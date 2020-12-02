@@ -1,0 +1,18 @@
+[package]
+name = "workflow-doodling"
+version = "0.1.0"
+authors = ["David Pacheco <dap@oxidecomputer.com>"]
+edition = "2018"
+
+[dependencies]
+anyhow = "1.0.34"
+futures = "0.3.1"
+petgraph = "0.5.1"
+
+[dependencies.slog]
+version = "2.5"
+features = [ "max_level_trace", "release_max_level_debug" ]
+
+[dependencies.tokio]
+version = "0.3"
+features = [ "full" ]
