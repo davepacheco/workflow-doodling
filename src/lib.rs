@@ -112,7 +112,7 @@ async fn demo_prov_instance_boot() -> WfResult {
 }
 
 #[derive(Debug)]
-struct WorkflowBuilder {
+struct WfBuilder {
     graph: Graph<Box<dyn WfAction>, ()>,
     root: NodeIndex,
     last: Vec<NodeIndex>,
@@ -123,12 +123,12 @@ async fn wf_action_first() -> WfResult {
     Ok(())
 }
 
-impl WorkflowBuilder {
-    fn new() -> WorkflowBuilder {
+impl WfBuilder {
+    fn new() -> WfBuilder {
         let mut graph = Graph::<Box<dyn WfAction>, ()>::new();
         let root = graph.add_node(Box::new(wf_action_first));
 
-        WorkflowBuilder {
+        WfBuilder {
             graph,
             root,
             last: vec![root],
@@ -172,8 +172,8 @@ impl WorkflowBuilder {
     }
 }
 
-fn make_provision_workflow() -> WorkflowBuilder {
-    let mut w = WorkflowBuilder::new();
+fn make_provision_workflow() -> WfBuilder {
+    let mut w = WfBuilder::new();
 
     w.append(Box::new(demo_prov_instance_create));
     w.append_parallel(vec![
@@ -189,8 +189,8 @@ fn make_provision_workflow() -> WorkflowBuilder {
 mod test {
     use super::make_provision_workflow;
     use super::WfAction;
+    use super::WfBuilder;
     use super::WfResult;
-    use super::WorkflowBuilder;
 
     #[test]
     fn test_make_provision() {
