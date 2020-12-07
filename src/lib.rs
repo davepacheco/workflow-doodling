@@ -419,11 +419,10 @@ impl WfExecutor {
             error: None,
         }
     }
-    // XXX
-    //}
-    //
-    //impl<'a> Future for WfExecutor<'a> {
-    //    type Output = WfResult;
+}
+
+impl Future for WfExecutor {
+    type Output = WfResult;
 
     fn poll<'a>(
         mut self: Pin<&'a mut WfExecutor>,
