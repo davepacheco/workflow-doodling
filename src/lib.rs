@@ -131,6 +131,7 @@
  */
 
 #![feature(type_name_of_val)]
+#![feature(option_expect_none)]
 #![deny(elided_lifetimes_in_paths)]
 
 use core::fmt;
@@ -159,7 +160,7 @@ type WfResult = Result<(), WfError>;
 
 #[async_trait]
 trait WfAction {
-    async fn do_it(&'static self) -> WfResult;
+    async fn do_it(self: Box<Self>) -> WfResult;
 
     /*
      * Currently, all WfAction objects are really functions.  If Fn impl'd
@@ -189,7 +190,7 @@ where
     Func: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = WfResult> + Send + Sync + 'static,
 {
-    async fn do_it(&'static self) -> WfResult {
+    async fn do_it(self: Box<Self>) -> WfResult {
         (self)().await
     }
 
@@ -268,12 +269,9 @@ async fn demo_prov_instance_boot() -> WfResult {
  */
 #[derive(Debug)]
 pub struct WfBuilder {
-    /*
-     * DAG of workflow nodes.  We use the WfAction itself as the "weight".  It's
-     * not clear if it's intended to be used this way.  If not, we could replace
-     * this with a BTreeMap of node indexes to Box<dyn WfAction>.
-     */
-    graph: Graph<Box<dyn WfAction>, ()>,
+    /* DAG of workflow nodes. */
+    graph: Graph<(), ()>,
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     root: NodeIndex,
     last: Vec<NodeIndex>,
 }
@@ -285,11 +283,15 @@ async fn wf_action_first() -> WfResult {
 
 impl WfBuilder {
     fn new() -> WfBuilder {
-        let mut graph = Graph::<Box<dyn WfAction>, ()>::new();
-        let root = graph.add_node(Box::new(wf_action_first));
+        let mut graph = Graph::new();
+        let mut launchers = BTreeMap::new();
+        let root = graph.add_node(());
+        let func: Box<dyn WfAction> = Box::new(wf_action_first);
+        launchers.insert(root, func); // XXX expect_none()
 
         WfBuilder {
             graph,
+            launchers,
             root,
             last: vec![root],
         }
@@ -301,7 +303,10 @@ impl WfBuilder {
      * phase.
      */
     fn append(&mut self, action: Box<dyn WfAction>) {
-        let newnode = self.graph.add_node(action);
+        let newnode = self.graph.add_node(());
+        self.launchers
+            .insert(newnode, action)
+            .expect_none("action already present for newly created node");
         for node in &self.last {
             self.graph.add_edge(*node, newnode, ());
         }
@@ -315,8 +320,16 @@ impl WfBuilder {
      * actions in the previous phase having been completed.
      */
     fn append_parallel(&mut self, actions: Vec<Box<dyn WfAction>>) {
-        let newnodes: Vec<NodeIndex> =
-            actions.into_iter().map(|a| self.graph.add_node(a)).collect();
+        let newnodes: Vec<NodeIndex> = actions
+            .into_iter()
+            .map(|a| {
+                let node = self.graph.add_node(());
+                self.launchers.insert(node, a).expect_none(
+                    "action already present for newly created node",
+                );
+                node
+            })
+            .collect();
 
         /*
          * For this exploration, we assume that any nodes appended after a
@@ -344,14 +357,22 @@ impl WfBuilder {
     fn build(self) -> Workflow {
         Workflow {
             graph: self.graph,
+            launchers: self.launchers,
             root: self.root,
         }
     }
 }
 
 pub struct Workflow {
-    graph: Graph<Box<dyn WfAction>, ()>,
+    graph: Graph<(), ()>,
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     root: NodeIndex,
+}
+
+impl Debug for Workflow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Workflow").field("graph", &self.graph).finish()
+    }
 }
 
 /*
@@ -377,10 +398,12 @@ pub fn make_provision_workflow() -> Workflow {
  * Executes a workflow.
  */
 struct WfExecutor {
-    graph: Graph<Box<dyn WfAction>, ()>,
+    graph: Graph<(), ()>,
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     running: BTreeMap<NodeIndex, BoxFuture<'static, WfResult>>,
     finished: BTreeSet<NodeIndex>,
     ready: Vec<NodeIndex>,
+
     // XXX replace with finished.len()
     nfinished: usize,
     // XXX probably better as a state enum
@@ -391,6 +414,7 @@ impl WfExecutor {
     fn new(w: Workflow) -> WfExecutor {
         WfExecutor {
             graph: w.graph,
+            launchers: w.launchers,
             running: BTreeMap::new(),
             finished: BTreeSet::new(),
             ready: vec![w.root],
@@ -489,7 +513,10 @@ impl WfExecutor {
             let to_schedule = self.ready.drain(..).collect::<Vec<NodeIndex>>();
             for node in to_schedule {
                 let graph = &self.graph;
-                let wfaction = &graph[node];
+                let wfaction = self
+                    .launchers
+                    .remove(&node)
+                    .expect("missing action for node");
                 let fut = wfaction.do_it();
                 let boxed = fut.boxed();
                 self.running.insert(node, boxed);
