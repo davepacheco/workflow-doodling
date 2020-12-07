@@ -69,6 +69,8 @@
  *   - concurrency limit
  *   - canarying
  *   - blast radius?
+ *   - pausing
+ *   - summary of current state a la Manta resharder
  * - revisit static typing in the construction and execution of the graph?  We
  *   could say that each node has its own input type and maybe use a macro to
  *   make that ergonomic (so that people don't have to define a new type for
@@ -129,12 +131,24 @@
  */
 
 #![feature(type_name_of_val)]
+#![deny(elided_lifetimes_in_paths)]
 
 use core::fmt;
 use core::fmt::Debug;
 use core::future::Future;
-use petgraph::graph::Graph;
+use core::pin::Pin;
+use core::task::Context;
+use core::task::Poll;
+use futures::future::BoxFuture;
+use futures::FutureExt;
 use petgraph::graph::NodeIndex;
+use petgraph::Graph;
+use petgraph::Incoming;
+use petgraph::Outgoing;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+
+use anyhow::anyhow;
 
 #[macro_use]
 extern crate async_trait;
@@ -145,7 +159,7 @@ type WfResult = Result<(), WfError>;
 
 #[async_trait]
 trait WfAction {
-    async fn do_it(&self) -> WfResult;
+    async fn do_it(&'static self) -> WfResult;
 
     /*
      * Currently, all WfAction objects are really functions.  If Fn impl'd
@@ -175,7 +189,7 @@ where
     Func: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = WfResult> + Send + Sync + 'static,
 {
-    async fn do_it(&self) -> WfResult {
+    async fn do_it(&'static self) -> WfResult {
         (self)().await
     }
 
@@ -326,12 +340,24 @@ impl WfBuilder {
 
         self.last = newnodes;
     }
+
+    fn build(self) -> Workflow {
+        Workflow {
+            graph: self.graph,
+            root: self.root,
+        }
+    }
+}
+
+pub struct Workflow {
+    graph: Graph<Box<dyn WfAction>, ()>,
+    root: NodeIndex,
 }
 
 /*
  * Construct a demo "provision" workflow matching the description above.
  */
-pub fn make_provision_workflow() -> WfBuilder {
+pub fn make_provision_workflow() -> Workflow {
     let mut w = WfBuilder::new();
 
     w.append(Box::new(demo_prov_instance_create));
@@ -344,7 +370,149 @@ pub fn make_provision_workflow() -> WfBuilder {
     w.append(Box::new(demo_prov_volume_attach));
     w.append(Box::new(demo_prov_instance_boot));
 
-    w
+    w.build()
+}
+
+/*
+ * Executes a workflow.
+ */
+struct WfExecutor {
+    graph: Graph<Box<dyn WfAction>, ()>,
+    running: BTreeMap<NodeIndex, BoxFuture<'static, WfResult>>,
+    finished: BTreeSet<NodeIndex>,
+    ready: Vec<NodeIndex>,
+    // XXX replace with finished.len()
+    nfinished: usize,
+    // XXX probably better as a state enum
+    error: Option<WfError>,
+}
+
+impl WfExecutor {
+    fn new(w: Workflow) -> WfExecutor {
+        WfExecutor {
+            graph: w.graph,
+            running: BTreeMap::new(),
+            finished: BTreeSet::new(),
+            ready: vec![w.root],
+            nfinished: 0,
+            error: None,
+        }
+    }
+    // XXX
+    //}
+    //
+    //impl<'a> Future for WfExecutor<'a> {
+    //    type Output = WfResult;
+
+    fn poll<'a>(
+        mut self: Pin<&'a mut WfExecutor>,
+        cx: &'a mut Context<'_>,
+    ) -> Poll<WfResult> {
+        let mut recheck = false;
+
+        assert!(self.nfinished <= self.graph.node_count());
+
+        if let Some(_) = &self.error {
+            // TODO We'd like to emit the error that we saved here but we still
+            // hold a reference to it.  Maybe use take()?  But that leaves the
+            // internal state rather confused.  Maybe there should be a separate
+            // boolean for whether an error has been recorded.
+            return Poll::Ready(Err(anyhow!("workflow failed")));
+        }
+
+        if self.nfinished == self.graph.node_count() {
+            return Poll::Ready(Ok(()));
+        }
+
+        /*
+         * If there's nothing running and nothing ready to run and we're still
+         * not finished and haven't encountered an error, something has gone
+         * seriously wrong.
+         */
+        if self.running.is_empty() && self.ready.is_empty() {
+            panic!("workflow came to rest without having finished");
+        }
+
+        /*
+         * If any of the tasks we currently think are running have now finished,
+         * walk their dependents and potentially mark them ready to run.
+         * TODO Is polling on _everything_ again really the right way to do
+         * this?  I'm basically following what futures::join! does.
+         */
+        let running = &mut self.running;
+        let finished = &mut self.finished;
+        //        for (node, fut) in running {
+        //            // XXX deref shouldn't be necessary
+        //            if let Poll::Ready(result) = fut.poll_unpin(cx) {
+        //                recheck = true;
+        //                self.nfinished += 1;
+        //                running.remove(node);
+        //                // XXX Is it okay to mutate inside assert?
+        //                assert!(finished.insert(*node));
+        //
+        //                if let Err(error) = result {
+        //                    /*
+        //                     * We currently assume errors are fatal.  That's not
+        //                     * necessarily right.
+        //                     * XXX how do we end right now?
+        //                     * XXX we'll need to clean up too!
+        //                     */
+        //                    self.error = Some(error)
+        //                } else {
+        //                    for depnode in
+        //                        self.graph.neighbors_directed(*node, Outgoing)
+        //                    {
+        //                        /*
+        //                         * Check whether all of this node's incoming edges are
+        //                         * now satisfied.
+        //                         */
+        //                        let mut okay = true;
+        //                        for upstream in
+        //                            self.graph.neighbors_directed(depnode, Incoming)
+        //                        {
+        //                            if !self.finished.contains(&upstream) {
+        //                                okay = false;
+        //                                break;
+        //                            }
+        //                        }
+        //
+        //                        if okay {
+        //                            self.ready.push(depnode);
+        //                        }
+        //                    }
+        //                }
+        //            }
+        //        }
+        //
+
+        if self.error.is_none() {
+            let to_schedule = self.ready.drain(..).collect::<Vec<NodeIndex>>();
+            for node in to_schedule {
+                let graph = &self.graph;
+                let wfaction = &graph[node];
+                let fut = wfaction.do_it();
+                let boxed = fut.boxed();
+                self.running.insert(node, boxed);
+                recheck = true;
+            }
+        }
+
+        /*
+         * If we completed any outstanding work, we need to re-check the end
+         * conditions.  If we dispatched any new work, we need to poll on those
+         * futures.  We could do either of those right here, but we'd have to
+         * duplicate code above.  It's easier to just invoke ourselves again
+         * with a tail call.  Of course, we don't want to do this if nothing
+         * changed, or we'll recurse indefinitely!
+         * TODO This isn't ideal, since we'll wind up polling again on anything
+         * that was already running.
+         */
+        if recheck {
+            self.poll(cx)
+        } else {
+            Poll::Pending
+        }
+    }
 }
 
 #[cfg(test)]
