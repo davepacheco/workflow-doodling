@@ -404,8 +404,6 @@ struct WfExecutor {
     finished: BTreeSet<NodeIndex>,
     ready: Vec<NodeIndex>,
 
-    // XXX replace with finished.len()
-    nfinished: usize,
     // XXX probably better as a state enum
     error: Option<WfError>,
 }
@@ -418,7 +416,6 @@ impl WfExecutor {
             running: BTreeMap::new(),
             finished: BTreeSet::new(),
             ready: vec![w.root],
-            nfinished: 0,
             error: None,
         }
     }
@@ -434,7 +431,7 @@ impl WfExecutor {
     ) -> Poll<WfResult> {
         let mut recheck = false;
 
-        assert!(self.nfinished <= self.graph.node_count());
+        assert!(self.finished.len() <= self.graph.node_count());
 
         if let Some(_) = &self.error {
             // TODO We'd like to emit the error that we saved here but we still
@@ -444,7 +441,7 @@ impl WfExecutor {
             return Poll::Ready(Err(anyhow!("workflow failed")));
         }
 
-        if self.nfinished == self.graph.node_count() {
+        if self.finished.len() == self.graph.node_count() {
             return Poll::Ready(Ok(()));
         }
 
@@ -469,7 +466,6 @@ impl WfExecutor {
         //            // XXX deref shouldn't be necessary
         //            if let Poll::Ready(result) = fut.poll_unpin(cx) {
         //                recheck = true;
-        //                self.nfinished += 1;
         //                running.remove(node);
         //                // XXX Is it okay to mutate inside assert?
         //                assert!(finished.insert(*node));
