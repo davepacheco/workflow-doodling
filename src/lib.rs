@@ -128,6 +128,10 @@
  * every row in the Instance table to have a column for every possible workflow?
  * That kind of sucks.  (On the other hand, it might help us avoid issuing
  * multiple concurrent reboot workflows or something like that.)
+ *
+ * Playground links:
+ * Simplified version of problem with WfAction::do_it() taking a reference:
+ * - https://play.rust-lang.org/?version=stable&mode=debug&edition=2018&gist=09c93f6d2978eb09bed336e9f380d543
  */
 
 #![feature(type_name_of_val)]
@@ -160,6 +164,12 @@ type WfResult = Result<(), WfError>;
 
 #[async_trait]
 trait WfAction {
+    // TODO use of Box here seems dubious.  However, we don't want to pass a
+    // reference here because then the resulting Future's lifetime will be bound
+    // to the lifetime of the WfAction, which we don't really want.  We can
+    // transfer ownership here, but this is a trait object, and so has unknown
+    // size, so we cannot transfer ownership in this context.  Using a Box here
+    // seems to address that issue.
     async fn do_it(self: Box<Self>) -> WfResult;
 
     /*
@@ -459,50 +469,63 @@ impl Future for WfExecutor {
          * TODO Is polling on _everything_ again really the right way to do
          * this?  I'm basically following what futures::join! does.
          */
-        let running = &mut self.running;
-        let finished = &mut self.finished;
-        //        for (node, fut) in running {
-        //            // XXX deref shouldn't be necessary
-        //            if let Poll::Ready(result) = fut.poll_unpin(cx) {
-        //                recheck = true;
-        //                running.remove(node);
-        //                // XXX Is it okay to mutate inside assert?
-        //                assert!(finished.insert(*node));
-        //
-        //                if let Err(error) = result {
-        //                    /*
-        //                     * We currently assume errors are fatal.  That's not
-        //                     * necessarily right.
-        //                     * XXX how do we end right now?
-        //                     * XXX we'll need to clean up too!
-        //                     */
-        //                    self.error = Some(error)
-        //                } else {
-        //                    for depnode in
-        //                        self.graph.neighbors_directed(*node, Outgoing)
-        //                    {
-        //                        /*
-        //                         * Check whether all of this node's incoming edges are
-        //                         * now satisfied.
-        //                         */
-        //                        let mut okay = true;
-        //                        for upstream in
-        //                            self.graph.neighbors_directed(depnode, Incoming)
-        //                        {
-        //                            if !self.finished.contains(&upstream) {
-        //                                okay = false;
-        //                                break;
-        //                            }
-        //                        }
-        //
-        //                        if okay {
-        //                            self.ready.push(depnode);
-        //                        }
-        //                    }
-        //                }
-        //            }
-        //        }
-        //
+        let newly_finished = {
+            let mut newly_finished = Vec::new();
+
+            for (node, fut) in &mut self.running {
+                if let Poll::Ready(result) = fut.poll_unpin(cx) {
+                    recheck = true;
+                    newly_finished.push((*node, result));
+                }
+            }
+
+            newly_finished
+        };
+
+        for (node, result) in newly_finished {
+            self.running.remove(&node);
+            // XXX Is it reasonable to mutate inside assert?
+            assert!(self.finished.insert(node));
+
+            if let Err(error) = result {
+                /*
+                 * We currently assume errors are fatal.  That's not
+                 * necessarily right.
+                 * XXX how do we end right now?
+                 * XXX we'll need to clean up too!
+                 */
+                self.error = Some(error)
+            } else {
+                let mut newly_ready = Vec::new();
+
+                for depnode in self.graph.neighbors_directed(node, Outgoing) {
+                    /*
+                     * Check whether all of this node's incoming edges are
+                     * now satisfied.
+                     */
+                    let mut okay = true;
+                    for upstream in
+                        self.graph.neighbors_directed(depnode, Incoming)
+                    {
+                        if !self.finished.contains(&upstream) {
+                            okay = false;
+                            break;
+                        }
+                    }
+
+                    if okay {
+                        newly_ready.push(depnode);
+                    }
+                }
+
+                // TODO It'd be nice to do this inline above, but we cannot
+                // borrow self.graph in order to iterate over
+                // neighbors_directed() while also borrowing self.ready mutably.
+                for depnode in newly_ready {
+                    self.ready.push(depnode);
+                }
+            }
+        }
 
         if self.error.is_none() {
             let to_schedule = self.ready.drain(..).collect::<Vec<NodeIndex>>();
