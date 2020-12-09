@@ -407,7 +407,7 @@ pub fn make_provision_workflow() -> Workflow {
 /*
  * Executes a workflow.
  */
-struct WfExecutor {
+pub struct WfExecutor {
     graph: Graph<(), ()>,
     launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     running: BTreeMap<NodeIndex, BoxFuture<'static, WfResult>>,
@@ -419,7 +419,7 @@ struct WfExecutor {
 }
 
 impl WfExecutor {
-    fn new(w: Workflow) -> WfExecutor {
+    pub fn new(w: Workflow) -> WfExecutor {
         WfExecutor {
             graph: w.graph,
             launchers: w.launchers,
@@ -530,7 +530,6 @@ impl Future for WfExecutor {
         if self.error.is_none() {
             let to_schedule = self.ready.drain(..).collect::<Vec<NodeIndex>>();
             for node in to_schedule {
-                let graph = &self.graph;
                 let wfaction = self
                     .launchers
                     .remove(&node)
@@ -563,16 +562,20 @@ impl Future for WfExecutor {
 #[cfg(test)]
 mod test {
     use super::make_provision_workflow;
+    use super::WfExecutor;
 
     /*
      * Exercises much of the code here by constructing the demo provision
      * workflow.  We print the "Dot"-format graph to stderr so that we can
      * visually inspect the result.
      */
-    #[test]
-    fn test_make_provision() {
+    #[tokio::test]
+    async fn test_make_provision() {
         let w = make_provision_workflow();
         eprintln!("{:?}", w);
-        eprintln!("{:?}", petgraph::dot::Dot::new(&w.graph))
+        eprintln!("{:?}", petgraph::dot::Dot::new(&w.graph));
+
+        let e = WfExecutor::new(w);
+        e.await.unwrap();
     }
 }
