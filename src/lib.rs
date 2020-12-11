@@ -424,7 +424,7 @@ async fn demo_prov_instance_boot(
 #[derive(Debug)]
 pub struct WfBuilder {
     /* DAG of workflow nodes. */
-    graph: Graph<(), ()>,
+    graph: Graph<String, ()>,
     launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     root: NodeIndex,
     last: Vec<NodeIndex>,
@@ -445,9 +445,10 @@ impl WfBuilder {
     fn new() -> WfBuilder {
         let mut graph = Graph::new();
         let mut launchers = BTreeMap::new();
-        let root = graph.add_node(());
         let first: Box<dyn WfAction + 'static> =
             Box::new(WfActionUniversalFirst {});
+        let label = format!("{:?}", first);
+        let root = graph.add_node(label);
         launchers.insert(root, first).expect_none("empty map had an element");
 
         WfBuilder {
@@ -464,7 +465,8 @@ impl WfBuilder {
      * phase.
      */
     fn append(&mut self, action: Box<dyn WfAction>) {
-        let newnode = self.graph.add_node(());
+        let label = format!("{:?}", action);
+        let newnode = self.graph.add_node(label);
         self.launchers
             .insert(newnode, action)
             .expect_none("action already present for newly created node");
@@ -484,7 +486,8 @@ impl WfBuilder {
         let newnodes: Vec<NodeIndex> = actions
             .into_iter()
             .map(|a| {
-                let node = self.graph.add_node(());
+                let label = format!("{:?}", a);
+                let node = self.graph.add_node(label);
                 self.launchers.insert(node, a).expect_none(
                     "action already present for newly created node",
                 );
@@ -525,7 +528,7 @@ impl WfBuilder {
 }
 
 pub struct Workflow {
-    graph: Graph<(), ()>,
+    graph: Graph<String, ()>,
     launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     root: NodeIndex,
 }
@@ -572,7 +575,7 @@ pub fn make_provision_workflow() -> (Workflow, Arc<Mutex<DemoProv>>) {
  * Executes a workflow.
  */
 pub struct WfExecutor {
-    graph: Graph<(), ()>,
+    graph: Graph<String, ()>,
     launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     running: BTreeMap<NodeIndex, BoxFuture<'static, WfResult>>,
     finished: BTreeSet<NodeIndex>,
