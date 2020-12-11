@@ -45,17 +45,14 @@
  *   exactly the steps that it's allowed to execute with maximum parallelism
  * - shared data: flesh out the demo implementation by having the functions
  *   actually share data
+ * - composeability: inserting an entire workflow into a workflow node.  A big
+ *   challenge here is that the state objects will differ.  Callers have to deal
+ *   with this in the node that's part of the parent graph.  (That's kind of
+ *   what you want anyway: callers will already be taking parameters out of the
+ *   parent state and making them part of the child state, most likely.)
  *
- * At this point, we can concisely express a set of steps that make up a
- * workflow.  Remaining things to de-risk:
+ * Remaining things to de-risk:
  *
- * - composeability: is it possible given what we've done at this point to
- *   insert an entire Workflow graph in the middle of another workflow?  It
- *   seems like the big problem here is that the state objects will differ.
- *   Maybe we impl WfAction for WfBuilder, and require that for that to work
- *   there must be an Into<...> to map one state type to the other?  Is that
- *   even possible?  (If you modify the state, do you need to be able to map it
- *   back?)
  * - persistence!  Can we get away with persisting only what nodes have started
  *   and finished?  Derisking this will involve not just persisting the state
  *   but making sure we can reconstitute the state from the persisted form and
