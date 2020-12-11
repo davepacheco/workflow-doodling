@@ -241,7 +241,8 @@ where
     async fn do_it(self: Box<Self>, wfctx: Arc<WfContext>) -> WfResult {
         //
         // TODO what compile-time check prevents the following runtime check
-        // from being violated?
+        // from being violated?  (Currently: none!  This should probably be part
+        // of the builder interface.)
         //
         let generic_state = Arc::clone(&wfctx.internal_state);
         let specific_state = generic_state
