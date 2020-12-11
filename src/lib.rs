@@ -138,9 +138,11 @@
 #![feature(option_expect_none)]
 #![deny(elided_lifetimes_in_paths)]
 
+use core::any::Any;
 use core::fmt;
 use core::fmt::Debug;
 use core::future::Future;
+use core::marker::PhantomData;
 use core::pin::Pin;
 use core::task::Context;
 use core::task::Poll;
@@ -161,21 +163,16 @@ use anyhow::anyhow;
 extern crate async_trait;
 
 /* Widely-used types (within workflows) */
-type WfError = anyhow::Error;
-type WfResult = Result<(), WfError>;
+pub type WfError = anyhow::Error;
+pub type WfResult = Result<(), WfError>;
+
+pub struct WfContext {
+    internal_state: Arc<dyn Any + Send + Sync + 'static>,
+}
 
 #[async_trait]
-trait WfAction<T>
-where
-    T: Debug + Send + Sync,
-{
-    // TODO use of Box here seems dubious.  However, we don't want to pass a
-    // reference here because then the resulting Future's lifetime will be bound
-    // to the lifetime of the WfAction, which we don't really want.  We can
-    // transfer ownership here, but this is a trait object, and so has unknown
-    // size, so we cannot transfer ownership in this context.  Using a Box here
-    // seems to address that issue.
-    async fn do_it(self: Box<Self>, wfstate: Arc<T>) -> WfResult;
+trait WfAction {
+    async fn do_it(self: Box<Self>, wfctx: Arc<WfContext>) -> WfResult;
 
     /*
      * Currently, all WfAction objects are really functions.  If Fn impl'd
@@ -186,6 +183,7 @@ where
 }
 
 /*
+ * TODO revisit this
  * See above.  This also sucks because the specific WfAction impl might have its
  * own more specific Debug impl.  If we wanted to keep this workaround while
  * still supporting that, then instead of implementing WfAction for functions,
@@ -193,28 +191,58 @@ where
  * Debug itself (the way we do below).  Then we would simply require that
  * WfAction types impl Debug instead of doing this here.
  */
-impl<T> Debug for dyn WfAction<T>
-where
-    T: Debug + Send + Sync,
-{
+impl Debug for dyn WfAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WfAction").field("impl", &self.debug_label()).finish()
     }
 }
 
-#[async_trait]
-impl<Fut, Func, T> WfAction<T> for Func
+struct WfActionFunc<StateType, FutType, FuncType>
 where
-    T: Debug + Send + Sync + 'static,
-    Func: Fn(Arc<T>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = WfResult> + Send + Sync + 'static,
+    StateType: Send + Sync + 'static,
+    FuncType:
+        Fn(Arc<WfContext>, Arc<StateType>) -> FutType + Send + Sync + 'static,
+    FutType: Future<Output = WfResult> + Send + Sync + 'static,
 {
-    async fn do_it(self: Box<Self>, wfstate: Arc<T>) -> WfResult {
-        (self)(Arc::clone(&wfstate)).await
+    func: FuncType,
+    phantom: PhantomData<(StateType, FutType)>,
+}
+
+impl<StateType, FutType, FuncType> WfActionFunc<StateType, FutType, FuncType>
+where
+    StateType: Send + Sync + 'static,
+    FuncType:
+        Fn(Arc<WfContext>, Arc<StateType>) -> FutType + Send + Sync + 'static,
+    FutType: Future<Output = WfResult> + Send + Sync + 'static,
+{
+    fn new_action(f: FuncType) -> Box<dyn WfAction> {
+        Box::new(WfActionFunc {
+            func: f,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[async_trait]
+impl<StateType, FutType, FuncType> WfAction
+    for WfActionFunc<StateType, FutType, FuncType>
+where
+    StateType: Send + Sync + 'static,
+    FuncType:
+        Fn(Arc<WfContext>, Arc<StateType>) -> FutType + Send + Sync + 'static,
+    FutType: Future<Output = WfResult> + Send + Sync + 'static,
+{
+    async fn do_it(self: Box<Self>, wfctx: Arc<WfContext>) -> WfResult {
+        // XXX what prevents this at compile time?
+        let generic_state = Arc::clone(&wfctx.internal_state);
+        let specific_state = generic_state
+            .downcast::<StateType>()
+            .expect("wrong state type for WfActionFunc!");
+        (self.func)(wfctx, specific_state).await
     }
 
     fn debug_label(&self) -> &str {
-        std::any::type_name_of_val(self)
+        std::any::type_name_of_val(&self.func)
     }
 }
 
@@ -253,14 +281,20 @@ pub struct DemoProv {
 
 type DemoProvWfState = Arc<Mutex<DemoProv>>;
 
-async fn demo_prov_instance_create(wfstate: DemoProvWfState) -> WfResult {
+async fn demo_prov_instance_create(
+    _wfctx: Arc<WfContext>,
+    wfstate: DemoProvWfState,
+) -> WfResult {
     eprintln!("create instance");
     let instance_id = 1211;
     let mut st = wfstate.lock().await;
     st.instance_id.replace(instance_id).expect_none("duplicate instance id");
     Ok(())
 }
-async fn demo_prov_vpc_alloc_ip(wfstate: DemoProvWfState) -> WfResult {
+async fn demo_prov_vpc_alloc_ip(
+    _wfctx: Arc<WfContext>,
+    wfstate: DemoProvWfState,
+) -> WfResult {
     eprintln!("allocate IP");
     let ip = String::from("10.120.121.122");
     let mut st = wfstate.lock().await;
@@ -268,7 +302,10 @@ async fn demo_prov_vpc_alloc_ip(wfstate: DemoProvWfState) -> WfResult {
     st.ip.replace(ip).expect_none("duplicate vpc ip");
     Ok(())
 }
-async fn demo_prov_server_pick(wfstate: DemoProvWfState) -> WfResult {
+async fn demo_prov_server_pick(
+    _wfctx: Arc<WfContext>,
+    wfstate: DemoProvWfState,
+) -> WfResult {
     eprintln!("pick server");
     let server_id = 1212;
     let mut st = wfstate.lock().await;
@@ -282,11 +319,17 @@ async fn demo_prov_server_pick(wfstate: DemoProvWfState) -> WfResult {
  * resources".  A solution to composeability might address this (see above)
  * because this could be a subworkflow.
  */
-async fn demo_prov_server_reserve(_wfstate: DemoProvWfState) -> WfResult {
+async fn demo_prov_server_reserve(
+    _wfctx: Arc<WfContext>,
+    _wfstate: DemoProvWfState,
+) -> WfResult {
     eprintln!("reserve server");
     Ok(())
 }
-async fn demo_prov_volume_create(wfstate: DemoProvWfState) -> WfResult {
+async fn demo_prov_volume_create(
+    _wfctx: Arc<WfContext>,
+    wfstate: DemoProvWfState,
+) -> WfResult {
     eprintln!("create volume");
     let volume_id = 1213;
     let mut st = wfstate.lock().await;
@@ -294,7 +337,10 @@ async fn demo_prov_volume_create(wfstate: DemoProvWfState) -> WfResult {
     st.volume_id.replace(volume_id).expect_none("duplicate volume id");
     Ok(())
 }
-async fn demo_prov_instance_configure(wfstate: DemoProvWfState) -> WfResult {
+async fn demo_prov_instance_configure(
+    _wfctx: Arc<WfContext>,
+    wfstate: DemoProvWfState,
+) -> WfResult {
     eprintln!("configure instance");
     let st = wfstate.lock().await;
     assert_eq!(st.instance_id.unwrap(), 1211);
@@ -302,7 +348,10 @@ async fn demo_prov_instance_configure(wfstate: DemoProvWfState) -> WfResult {
     assert_eq!(st.volume_id.unwrap(), 1213);
     Ok(())
 }
-async fn demo_prov_volume_attach(wfstate: DemoProvWfState) -> WfResult {
+async fn demo_prov_volume_attach(
+    _wfctx: Arc<WfContext>,
+    wfstate: DemoProvWfState,
+) -> WfResult {
     eprintln!("attach volume");
     let st = wfstate.lock().await;
     assert_eq!(st.instance_id.unwrap(), 1211);
@@ -310,7 +359,10 @@ async fn demo_prov_volume_attach(wfstate: DemoProvWfState) -> WfResult {
     assert_eq!(st.volume_id.unwrap(), 1213);
     Ok(())
 }
-async fn demo_prov_instance_boot(wfstate: DemoProvWfState) -> WfResult {
+async fn demo_prov_instance_boot(
+    _wfctx: Arc<WfContext>,
+    wfstate: DemoProvWfState,
+) -> WfResult {
     eprintln!("boot instance");
     let st = wfstate.lock().await;
     assert_eq!(st.instance_id.unwrap(), 1211);
@@ -324,32 +376,36 @@ async fn demo_prov_instance_boot(wfstate: DemoProvWfState) -> WfResult {
  * and `append_parallel()` for more.
  */
 #[derive(Debug)]
-pub struct WfBuilder<T>
-where
-    T: Debug + Send + Sync,
-{
+pub struct WfBuilder {
     /* DAG of workflow nodes. */
     graph: Graph<(), ()>,
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction<T>>>,
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     root: NodeIndex,
     last: Vec<NodeIndex>,
 }
 
-async fn wf_action_first<T>(_: T) -> WfResult {
-    eprintln!("universal first action");
-    Ok(())
+struct WfActionUniversalFirst {}
+
+#[async_trait]
+impl WfAction for WfActionUniversalFirst {
+    async fn do_it(self: Box<Self>, _: Arc<WfContext>) -> WfResult {
+        eprintln!("universal first action");
+        Ok(())
+    }
+
+    fn debug_label(&self) -> &str {
+        "universal first action in a workflow"
+    }
 }
 
-impl<T> WfBuilder<T>
-where
-    T: Debug + Send + Sync + 'static,
-{
-    fn new() -> WfBuilder<T> {
+impl WfBuilder {
+    fn new() -> WfBuilder {
         let mut graph = Graph::new();
         let mut launchers = BTreeMap::new();
         let root = graph.add_node(());
-        let func: Box<dyn WfAction<T>> = Box::new(wf_action_first);
-        launchers.insert(root, func); // XXX expect_none()
+        let first: Box<dyn WfAction + 'static> =
+            Box::new(WfActionUniversalFirst {});
+        launchers.insert(root, first); // XXX expect_none()
 
         WfBuilder {
             graph,
@@ -364,7 +420,7 @@ where
      * This action will depend on completion of all actions in the previous
      * phase.
      */
-    fn append(&mut self, action: Box<dyn WfAction<T>>) {
+    fn append(&mut self, action: Box<dyn WfAction>) {
         let newnode = self.graph.add_node(());
         self.launchers
             .insert(newnode, action)
@@ -381,7 +437,7 @@ where
      * may run concurrently.  These actions will individually depend on all
      * actions in the previous phase having been completed.
      */
-    fn append_parallel(&mut self, actions: Vec<Box<dyn WfAction<T>>>) {
+    fn append_parallel(&mut self, actions: Vec<Box<dyn WfAction>>) {
         let newnodes: Vec<NodeIndex> = actions
             .into_iter()
             .map(|a| {
@@ -416,7 +472,7 @@ where
         self.last = newnodes;
     }
 
-    fn build(self) -> Workflow<T> {
+    fn build(self) -> Workflow {
         Workflow {
             graph: self.graph,
             launchers: self.launchers,
@@ -425,19 +481,13 @@ where
     }
 }
 
-pub struct Workflow<T>
-where
-    T: Debug + Send + Sync,
-{
+pub struct Workflow {
     graph: Graph<(), ()>,
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction<T>>>,
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     root: NodeIndex,
 }
 
-impl<T> Debug for Workflow<T>
-where
-    T: Debug + Send + Sync,
-{
+impl Debug for Workflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Workflow").field("graph", &self.graph).finish()
     }
@@ -451,19 +501,18 @@ where
  * I'm not sure it's possible to say only the initial state be Clone and not all
  * of the intermediate states.
  */
-pub fn make_provision_workflow(
-) -> (Workflow<Mutex<DemoProv>>, Arc<Mutex<DemoProv>>) {
+pub fn make_provision_workflow() -> (Workflow, Arc<Mutex<DemoProv>>) {
     let mut w = WfBuilder::new();
 
-    w.append(Box::new(demo_prov_instance_create));
+    w.append(WfActionFunc::new_action(demo_prov_instance_create));
     w.append_parallel(vec![
-        Box::new(demo_prov_vpc_alloc_ip),
-        Box::new(demo_prov_volume_create),
-        Box::new(demo_prov_server_pick),
+        WfActionFunc::new_action(demo_prov_vpc_alloc_ip),
+        WfActionFunc::new_action(demo_prov_volume_create),
+        WfActionFunc::new_action(demo_prov_server_pick),
     ]);
-    w.append(Box::new(demo_prov_instance_configure));
-    w.append(Box::new(demo_prov_volume_attach));
-    w.append(Box::new(demo_prov_instance_boot));
+    w.append(WfActionFunc::new_action(demo_prov_instance_configure));
+    w.append(WfActionFunc::new_action(demo_prov_volume_attach));
+    w.append(WfActionFunc::new_action(demo_prov_instance_boot));
 
     let wf = w.build();
     let init_state = DemoProv {
@@ -479,46 +528,42 @@ pub fn make_provision_workflow(
 /*
  * Executes a workflow.
  */
-pub struct WfExecutor<T>
-where
-    T: Debug + Send + Sync,
-{
+pub struct WfExecutor {
     graph: Graph<(), ()>,
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction<T>>>,
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     running: BTreeMap<NodeIndex, BoxFuture<'static, WfResult>>,
     finished: BTreeSet<NodeIndex>,
     ready: Vec<NodeIndex>,
-    wfstate: Arc<T>,
+    wfcontext: Arc<WfContext>,
 
     // XXX probably better as a state enum
     error: Option<WfError>,
 }
 
-impl<T> WfExecutor<T>
-where
-    T: Debug + Send + Sync,
-{
-    pub fn new(w: Workflow<T>, wfstate: Arc<T>) -> WfExecutor<T> {
+impl WfExecutor {
+    pub fn new(
+        w: Workflow,
+        wfstate: Arc<dyn Any + Send + Sync + 'static>,
+    ) -> WfExecutor {
         WfExecutor {
             graph: w.graph,
             launchers: w.launchers,
             running: BTreeMap::new(),
             finished: BTreeSet::new(),
             ready: vec![w.root],
-            wfstate,
+            wfcontext: Arc::new(WfContext {
+                internal_state: wfstate,
+            }),
             error: None,
         }
     }
 }
 
-impl<T> Future for WfExecutor<T>
-where
-    T: Debug + Send + Sync + 'static,
-{
+impl Future for WfExecutor {
     type Output = WfResult;
 
     fn poll<'a>(
-        mut self: Pin<&'a mut WfExecutor<T>>,
+        mut self: Pin<&'a mut WfExecutor>,
         cx: &'a mut Context<'_>,
     ) -> Poll<WfResult> {
         let mut recheck = false;
@@ -617,7 +662,7 @@ where
                     .launchers
                     .remove(&node)
                     .expect("missing action for node");
-                let fut = wfaction.do_it(Arc::clone(&self.wfstate));
+                let fut = wfaction.do_it(Arc::clone(&self.wfcontext));
                 let boxed = fut.boxed();
                 self.running.insert(node, boxed);
                 recheck = true;
@@ -646,6 +691,7 @@ where
 mod test {
     use super::make_provision_workflow;
     use super::WfExecutor;
+    use core::any::Any;
     use std::sync::Arc;
 
     /*
@@ -663,7 +709,9 @@ mod test {
         }
         eprintln!("{:?}", petgraph::dot::Dot::new(&w.graph));
 
-        let e = WfExecutor::new(w, Arc::clone(&init_state));
+        let generic_state =
+            Arc::clone(&init_state) as Arc<dyn Any + Send + Sync>;
+        let e = WfExecutor::new(w, generic_state);
         e.await.unwrap();
         let st = init_state.lock().await;
         eprintln!("final state: {:?}", *st);
