@@ -188,30 +188,8 @@ impl WfContext {
 }
 
 #[async_trait]
-trait WfAction: Send {
+trait WfAction: Debug + Send {
     async fn do_it(self: Box<Self>, wfctx: Arc<WfContext>) -> WfResult;
-
-    /*
-     * Currently, all WfAction objects are really functions.  If Fn impl'd
-     * Debug, then we wouldn't need this, and we wouldn't need to impl Debug for
-     * WfAction either.
-     */
-    fn debug_label(&self) -> &str;
-}
-
-/*
- * TODO revisit this
- * See above.  This also sucks because the specific WfAction impl might have its
- * own more specific Debug impl.  If we wanted to keep this workaround while
- * still supporting that, then instead of implementing WfAction for functions,
- * we could create a struct WfActionFunc that wraps a function and implements
- * Debug itself (the way we do below).  Then we would simply require that
- * WfAction types impl Debug instead of doing this here.
- */
-impl Debug for dyn WfAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WfAction").field("impl", &self.debug_label()).finish()
-    }
 }
 
 struct WfActionFunc<StateType, FutType, FuncType>
@@ -238,6 +216,20 @@ where
     }
 }
 
+impl<StateType, FutType, FuncType> Debug
+    for WfActionFunc<StateType, FutType, FuncType>
+where
+    StateType: Send + Sync + 'static,
+    FuncType: Fn(Arc<WfContext>, Arc<StateType>) -> FutType + Send + 'static,
+    FutType: Future<Output = WfResult> + Send + 'static,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WfActionFunc")
+            .field("func", &std::any::type_name_of_val(&self.func))
+            .finish()
+    }
+}
+
 #[async_trait]
 impl<StateType, FutType, FuncType> WfAction
     for WfActionFunc<StateType, FutType, FuncType>
@@ -257,10 +249,6 @@ where
             .expect("wrong state type for WfActionFunc!");
         let fut = { (self.func)(wfctx, specific_state) };
         fut.await
-    }
-
-    fn debug_label(&self) -> &str {
-        std::any::type_name_of_val(&self.func)
     }
 }
 
@@ -442,6 +430,7 @@ pub struct WfBuilder {
     last: Vec<NodeIndex>,
 }
 
+#[derive(Debug)]
 struct WfActionUniversalFirst {}
 
 #[async_trait]
@@ -449,10 +438,6 @@ impl WfAction for WfActionUniversalFirst {
     async fn do_it(self: Box<Self>, _: Arc<WfContext>) -> WfResult {
         eprintln!("universal first action");
         Ok(())
-    }
-
-    fn debug_label(&self) -> &str {
-        "universal first action in a workflow"
     }
 }
 
