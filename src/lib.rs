@@ -168,10 +168,30 @@ pub type WfResult = Result<(), WfError>;
 
 pub struct WfContext {
     internal_state: Arc<dyn Any + Send + Sync + 'static>,
+    node: NodeIndex,
+}
+
+impl WfContext {
+    async fn child_workflow<T>(&self, wf: Workflow, st: Arc<T>) -> WfResult
+    where
+        T: Send + Sync + 'static,
+    {
+        /*
+         * TODO Really we want this to reach into the parent WfExecutor and make
+         * a record about this new execution.  This is mostly for observability
+         * and control: if someone asks for the status of the parent workflow,
+         * we'd like to give details on this child workflow.  Similarly if they
+         * pause the parent, that should pause the child one.  How can we do
+         * this?
+         */
+        let generic_state = st as Arc<dyn Any + Send + Sync>;
+        let e = WfExecutor::new(wf, generic_state);
+        e.await
+    }
 }
 
 #[async_trait]
-trait WfAction {
+trait WfAction: Send {
     async fn do_it(self: Box<Self>, wfctx: Arc<WfContext>) -> WfResult;
 
     /*
@@ -200,9 +220,8 @@ impl Debug for dyn WfAction {
 struct WfActionFunc<StateType, FutType, FuncType>
 where
     StateType: Send + Sync + 'static,
-    FuncType:
-        Fn(Arc<WfContext>, Arc<StateType>) -> FutType + Send + Sync + 'static,
-    FutType: Future<Output = WfResult> + Send + Sync + 'static,
+    FuncType: Fn(Arc<WfContext>, Arc<StateType>) -> FutType + Send + 'static,
+    FutType: Future<Output = WfResult> + Send + 'static,
 {
     func: FuncType,
     phantom: PhantomData<(StateType, FutType)>,
@@ -211,9 +230,8 @@ where
 impl<StateType, FutType, FuncType> WfActionFunc<StateType, FutType, FuncType>
 where
     StateType: Send + Sync + 'static,
-    FuncType:
-        Fn(Arc<WfContext>, Arc<StateType>) -> FutType + Send + Sync + 'static,
-    FutType: Future<Output = WfResult> + Send + Sync + 'static,
+    FuncType: Fn(Arc<WfContext>, Arc<StateType>) -> FutType + Send + 'static,
+    FutType: Future<Output = WfResult> + Send + 'static,
 {
     fn new_action(f: FuncType) -> Box<dyn WfAction> {
         Box::new(WfActionFunc {
@@ -228,17 +246,20 @@ impl<StateType, FutType, FuncType> WfAction
     for WfActionFunc<StateType, FutType, FuncType>
 where
     StateType: Send + Sync + 'static,
-    FuncType:
-        Fn(Arc<WfContext>, Arc<StateType>) -> FutType + Send + Sync + 'static,
-    FutType: Future<Output = WfResult> + Send + Sync + 'static,
+    FuncType: Fn(Arc<WfContext>, Arc<StateType>) -> FutType + Send + 'static,
+    FutType: Future<Output = WfResult> + Send + 'static,
 {
     async fn do_it(self: Box<Self>, wfctx: Arc<WfContext>) -> WfResult {
-        // XXX what prevents this at compile time?
+        //
+        // TODO what compile-time check prevents the following runtime check
+        // from being violated?
+        //
         let generic_state = Arc::clone(&wfctx.internal_state);
         let specific_state = generic_state
             .downcast::<StateType>()
             .expect("wrong state type for WfActionFunc!");
-        (self.func)(wfctx, specific_state).await
+        let fut = { (self.func)(wfctx, specific_state) };
+        fut.await
     }
 
     fn debug_label(&self) -> &str {
@@ -302,30 +323,70 @@ async fn demo_prov_vpc_alloc_ip(
     st.ip.replace(ip).expect_none("duplicate vpc ip");
     Ok(())
 }
-async fn demo_prov_server_pick(
-    _wfctx: Arc<WfContext>,
+
+/*
+ * The next two steps are in a subworkflow!
+ */
+async fn demo_prov_server_alloc(
+    wfctx: Arc<WfContext>,
     wfstate: DemoProvWfState,
 ) -> WfResult {
-    eprintln!("pick server");
+    eprintln!("allocate server (subworkflow)");
+
+    let mut w = WfBuilder::new();
+    w.append(WfActionFunc::new_action(demo_prov_server_pick));
+    w.append(WfActionFunc::new_action(demo_prov_server_reserve));
+    let wf = w.build();
+    let init_state = DemoProvPickState {
+        server_id: None,
+        allocated: false,
+    };
+
+    let child_state = Arc::new(Mutex::new(init_state));
+    wfctx.child_workflow(wf, Arc::clone(&child_state)).await?;
+
+    /*
+     * lock order: parent workflow state -> child workflow state
+     * at least for now.  In reality, there should be no other references to the
+     * child state so deadlock should not be possible in either order.
+     */
+    let mut parent_state = wfstate.lock().await;
+    let child_state = child_state.lock().await;
+    parent_state
+        .server_id
+        .replace(child_state.server_id.expect(
+            "child workflow completed without error but did not set server_id",
+        ))
+        .expect_none("server_id was already set");
+    Ok(())
+}
+
+struct DemoProvPickState {
+    server_id: Option<u64>,
+    allocated: bool,
+}
+async fn demo_prov_server_pick(
+    _wfctx: Arc<WfContext>,
+    wfstate: Arc<Mutex<DemoProvPickState>>,
+) -> WfResult {
+    eprintln!("    pick server");
     let server_id = 1212;
     let mut st = wfstate.lock().await;
-    assert_eq!(st.instance_id.unwrap(), 1211);
     st.server_id.replace(server_id).expect_none("duplicate server id");
     Ok(())
 }
-/*
- * TODO: the interface we've created so far does not support the two-step
- * operation consisting of "pick server" followed by "allocate server
- * resources".  A solution to composeability might address this (see above)
- * because this could be a subworkflow.
- */
 async fn demo_prov_server_reserve(
     _wfctx: Arc<WfContext>,
-    _wfstate: DemoProvWfState,
+    wfstate: Arc<Mutex<DemoProvPickState>>,
 ) -> WfResult {
-    eprintln!("reserve server");
+    eprintln!("    reserve server");
+    let mut st = wfstate.lock().await;
+    assert_eq!(st.server_id.unwrap(), 1212);
+    assert!(!st.allocated);
+    st.allocated = true;
     Ok(())
 }
+
 async fn demo_prov_volume_create(
     _wfctx: Arc<WfContext>,
     wfstate: DemoProvWfState,
@@ -405,7 +466,7 @@ impl WfBuilder {
         let root = graph.add_node(());
         let first: Box<dyn WfAction + 'static> =
             Box::new(WfActionUniversalFirst {});
-        launchers.insert(root, first); // XXX expect_none()
+        launchers.insert(root, first).expect_none("empty map had an element");
 
         WfBuilder {
             graph,
@@ -508,7 +569,7 @@ pub fn make_provision_workflow() -> (Workflow, Arc<Mutex<DemoProv>>) {
     w.append_parallel(vec![
         WfActionFunc::new_action(demo_prov_vpc_alloc_ip),
         WfActionFunc::new_action(demo_prov_volume_create),
-        WfActionFunc::new_action(demo_prov_server_pick),
+        WfActionFunc::new_action(demo_prov_server_alloc),
     ]);
     w.append(WfActionFunc::new_action(demo_prov_instance_configure));
     w.append(WfActionFunc::new_action(demo_prov_volume_attach));
@@ -534,9 +595,9 @@ pub struct WfExecutor {
     running: BTreeMap<NodeIndex, BoxFuture<'static, WfResult>>,
     finished: BTreeSet<NodeIndex>,
     ready: Vec<NodeIndex>,
-    wfcontext: Arc<WfContext>,
+    internal_state: Arc<dyn Any + Send + Sync + 'static>,
 
-    // XXX probably better as a state enum
+    // TODO probably better as a state enum
     error: Option<WfError>,
 }
 
@@ -551,9 +612,7 @@ impl WfExecutor {
             running: BTreeMap::new(),
             finished: BTreeSet::new(),
             ready: vec![w.root],
-            wfcontext: Arc::new(WfContext {
-                internal_state: wfstate,
-            }),
+            internal_state: wfstate,
             error: None,
         }
     }
@@ -612,15 +671,15 @@ impl Future for WfExecutor {
 
         for (node, result) in newly_finished {
             self.running.remove(&node);
-            // XXX Is it reasonable to mutate inside assert?
+            // TODO Is it reasonable to mutate inside assert?
             assert!(self.finished.insert(node));
 
             if let Err(error) = result {
                 /*
                  * We currently assume errors are fatal.  That's not
                  * necessarily right.
-                 * XXX how do we end right now?
-                 * XXX we'll need to clean up too!
+                 * TODO how do we end right now?
+                 * TODO we'll need to clean up too!
                  */
                 self.error = Some(error)
             } else {
@@ -662,7 +721,11 @@ impl Future for WfExecutor {
                     .launchers
                     .remove(&node)
                     .expect("missing action for node");
-                let fut = wfaction.do_it(Arc::clone(&self.wfcontext));
+                // TODO can probably drop this Arc
+                let fut = wfaction.do_it(Arc::new(WfContext {
+                    internal_state: Arc::clone(&self.internal_state),
+                    node: node,
+                }));
                 let boxed = fut.boxed();
                 self.running.insert(node, boxed);
                 recheck = true;
