@@ -41,14 +41,14 @@
  * - WfAction, which has a blanket impl for functions to minimize boilerplate
  * - WfBuilder, an interface for constructing a workflow graph pretty much by
  *   hand
+ * - basic execution: build an executor that walks the graph and executes
+ *   exactly the steps that it's allowed to execute with maximum parallelism
+ * - shared data: flesh out the demo implementation by having the functions
+ *   actually share data
  *
  * At this point, we can concisely express a set of steps that make up a
  * workflow.  Remaining things to de-risk:
  *
- * - execution: build an executor that walks the graph and executes exactly the
- *   steps that it's allowed to execute with maximum parallelism
- * - shared data: flesh out the demo implementation by having the functions
- *   actually share data
  * - composeability: is it possible given what we've done at this point to
  *   insert an entire Workflow graph in the middle of another workflow?  It
  *   seems like the big problem here is that the state objects will differ.
@@ -145,6 +145,7 @@ use core::pin::Pin;
 use core::task::Context;
 use core::task::Poll;
 use futures::future::BoxFuture;
+use futures::lock::Mutex;
 use futures::FutureExt;
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
@@ -152,6 +153,7 @@ use petgraph::Incoming;
 use petgraph::Outgoing;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 
@@ -163,14 +165,17 @@ type WfError = anyhow::Error;
 type WfResult = Result<(), WfError>;
 
 #[async_trait]
-trait WfAction {
+trait WfAction<T>
+where
+    T: Debug + Send + Sync,
+{
     // TODO use of Box here seems dubious.  However, we don't want to pass a
     // reference here because then the resulting Future's lifetime will be bound
     // to the lifetime of the WfAction, which we don't really want.  We can
     // transfer ownership here, but this is a trait object, and so has unknown
     // size, so we cannot transfer ownership in this context.  Using a Box here
     // seems to address that issue.
-    async fn do_it(self: Box<Self>) -> WfResult;
+    async fn do_it(self: Box<Self>, wfstate: Arc<T>) -> WfResult;
 
     /*
      * Currently, all WfAction objects are really functions.  If Fn impl'd
@@ -188,20 +193,24 @@ trait WfAction {
  * Debug itself (the way we do below).  Then we would simply require that
  * WfAction types impl Debug instead of doing this here.
  */
-impl Debug for dyn WfAction {
+impl<T> Debug for dyn WfAction<T>
+where
+    T: Debug + Send + Sync,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WfAction").field("impl", &self.debug_label()).finish()
     }
 }
 
 #[async_trait]
-impl<Fut, Func> WfAction for Func
+impl<Fut, Func, T> WfAction<T> for Func
 where
-    Func: Fn() -> Fut + Send + Sync + 'static,
+    T: Debug + Send + Sync + 'static,
+    Func: Fn(Arc<T>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = WfResult> + Send + Sync + 'static,
 {
-    async fn do_it(self: Box<Self>) -> WfResult {
-        (self)().await
+    async fn do_it(self: Box<Self>, wfstate: Arc<T>) -> WfResult {
+        (self)(Arc::clone(&wfstate)).await
     }
 
     fn debug_label(&self) -> &str {
@@ -234,16 +243,37 @@ where
  *          boot instance
  */
 
-async fn demo_prov_instance_create() -> WfResult {
+#[derive(Debug)]
+pub struct DemoProv {
+    instance_id: Option<u64>,
+    volume_id: Option<u64>,
+    ip: Option<String>,
+    server_id: Option<u64>,
+}
+
+type DemoProvWfState = Arc<Mutex<DemoProv>>;
+
+async fn demo_prov_instance_create(wfstate: DemoProvWfState) -> WfResult {
     eprintln!("create instance");
+    let instance_id = 1211;
+    let mut st = wfstate.lock().await;
+    st.instance_id.replace(instance_id).expect_none("duplicate instance id");
     Ok(())
 }
-async fn demo_prov_vpc_alloc_ip() -> WfResult {
+async fn demo_prov_vpc_alloc_ip(wfstate: DemoProvWfState) -> WfResult {
     eprintln!("allocate IP");
+    let ip = String::from("10.120.121.122");
+    let mut st = wfstate.lock().await;
+    assert_eq!(st.instance_id.unwrap(), 1211);
+    st.ip.replace(ip).expect_none("duplicate vpc ip");
     Ok(())
 }
-async fn demo_prov_server_pick() -> WfResult {
+async fn demo_prov_server_pick(wfstate: DemoProvWfState) -> WfResult {
     eprintln!("pick server");
+    let server_id = 1212;
+    let mut st = wfstate.lock().await;
+    assert_eq!(st.instance_id.unwrap(), 1211);
+    st.server_id.replace(server_id).expect_none("duplicate server id");
     Ok(())
 }
 /*
@@ -252,24 +282,40 @@ async fn demo_prov_server_pick() -> WfResult {
  * resources".  A solution to composeability might address this (see above)
  * because this could be a subworkflow.
  */
-async fn demo_prov_server_reserve() -> WfResult {
+async fn demo_prov_server_reserve(_wfstate: DemoProvWfState) -> WfResult {
     eprintln!("reserve server");
     Ok(())
 }
-async fn demo_prov_volume_create() -> WfResult {
+async fn demo_prov_volume_create(wfstate: DemoProvWfState) -> WfResult {
     eprintln!("create volume");
+    let volume_id = 1213;
+    let mut st = wfstate.lock().await;
+    assert_eq!(st.instance_id.unwrap(), 1211);
+    st.volume_id.replace(volume_id).expect_none("duplicate volume id");
     Ok(())
 }
-async fn demo_prov_instance_configure() -> WfResult {
+async fn demo_prov_instance_configure(wfstate: DemoProvWfState) -> WfResult {
     eprintln!("configure instance");
+    let st = wfstate.lock().await;
+    assert_eq!(st.instance_id.unwrap(), 1211);
+    assert_eq!(st.server_id.unwrap(), 1212);
+    assert_eq!(st.volume_id.unwrap(), 1213);
     Ok(())
 }
-async fn demo_prov_volume_attach() -> WfResult {
+async fn demo_prov_volume_attach(wfstate: DemoProvWfState) -> WfResult {
     eprintln!("attach volume");
+    let st = wfstate.lock().await;
+    assert_eq!(st.instance_id.unwrap(), 1211);
+    assert_eq!(st.server_id.unwrap(), 1212);
+    assert_eq!(st.volume_id.unwrap(), 1213);
     Ok(())
 }
-async fn demo_prov_instance_boot() -> WfResult {
+async fn demo_prov_instance_boot(wfstate: DemoProvWfState) -> WfResult {
     eprintln!("boot instance");
+    let st = wfstate.lock().await;
+    assert_eq!(st.instance_id.unwrap(), 1211);
+    assert_eq!(st.server_id.unwrap(), 1212);
+    assert_eq!(st.volume_id.unwrap(), 1213);
     Ok(())
 }
 
@@ -278,25 +324,31 @@ async fn demo_prov_instance_boot() -> WfResult {
  * and `append_parallel()` for more.
  */
 #[derive(Debug)]
-pub struct WfBuilder {
+pub struct WfBuilder<T>
+where
+    T: Debug + Send + Sync,
+{
     /* DAG of workflow nodes. */
     graph: Graph<(), ()>,
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction<T>>>,
     root: NodeIndex,
     last: Vec<NodeIndex>,
 }
 
-async fn wf_action_first() -> WfResult {
+async fn wf_action_first<T>(_: T) -> WfResult {
     eprintln!("universal first action");
     Ok(())
 }
 
-impl WfBuilder {
-    fn new() -> WfBuilder {
+impl<T> WfBuilder<T>
+where
+    T: Debug + Send + Sync + 'static,
+{
+    fn new() -> WfBuilder<T> {
         let mut graph = Graph::new();
         let mut launchers = BTreeMap::new();
         let root = graph.add_node(());
-        let func: Box<dyn WfAction> = Box::new(wf_action_first);
+        let func: Box<dyn WfAction<T>> = Box::new(wf_action_first);
         launchers.insert(root, func); // XXX expect_none()
 
         WfBuilder {
@@ -312,7 +364,7 @@ impl WfBuilder {
      * This action will depend on completion of all actions in the previous
      * phase.
      */
-    fn append(&mut self, action: Box<dyn WfAction>) {
+    fn append(&mut self, action: Box<dyn WfAction<T>>) {
         let newnode = self.graph.add_node(());
         self.launchers
             .insert(newnode, action)
@@ -329,7 +381,7 @@ impl WfBuilder {
      * may run concurrently.  These actions will individually depend on all
      * actions in the previous phase having been completed.
      */
-    fn append_parallel(&mut self, actions: Vec<Box<dyn WfAction>>) {
+    fn append_parallel(&mut self, actions: Vec<Box<dyn WfAction<T>>>) {
         let newnodes: Vec<NodeIndex> = actions
             .into_iter()
             .map(|a| {
@@ -364,7 +416,7 @@ impl WfBuilder {
         self.last = newnodes;
     }
 
-    fn build(self) -> Workflow {
+    fn build(self) -> Workflow<T> {
         Workflow {
             graph: self.graph,
             launchers: self.launchers,
@@ -373,13 +425,19 @@ impl WfBuilder {
     }
 }
 
-pub struct Workflow {
+pub struct Workflow<T>
+where
+    T: Debug + Send + Sync,
+{
     graph: Graph<(), ()>,
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction<T>>>,
     root: NodeIndex,
 }
 
-impl Debug for Workflow {
+impl<T> Debug for Workflow<T>
+where
+    T: Debug + Send + Sync,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Workflow").field("graph", &self.graph).finish()
     }
@@ -387,8 +445,14 @@ impl Debug for Workflow {
 
 /*
  * Construct a demo "provision" workflow matching the description above.
+ * TODO maybe the Workflow should include the initial state object instead of
+ * returning a tuple here?
+ * Should Workflow be Clone and require that the initial state here be Clone?
+ * I'm not sure it's possible to say only the initial state be Clone and not all
+ * of the intermediate states.
  */
-pub fn make_provision_workflow() -> Workflow {
+pub fn make_provision_workflow(
+) -> (Workflow<Mutex<DemoProv>>, Arc<Mutex<DemoProv>>) {
     let mut w = WfBuilder::new();
 
     w.append(Box::new(demo_prov_instance_create));
@@ -401,41 +465,60 @@ pub fn make_provision_workflow() -> Workflow {
     w.append(Box::new(demo_prov_volume_attach));
     w.append(Box::new(demo_prov_instance_boot));
 
-    w.build()
+    let wf = w.build();
+    let init_state = DemoProv {
+        instance_id: None,
+        volume_id: None,
+        ip: None,
+        server_id: None,
+    };
+
+    (wf, Arc::new(Mutex::new(init_state)))
 }
 
 /*
  * Executes a workflow.
  */
-pub struct WfExecutor {
+pub struct WfExecutor<T>
+where
+    T: Debug + Send + Sync,
+{
     graph: Graph<(), ()>,
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction<T>>>,
     running: BTreeMap<NodeIndex, BoxFuture<'static, WfResult>>,
     finished: BTreeSet<NodeIndex>,
     ready: Vec<NodeIndex>,
+    wfstate: Arc<T>,
 
     // XXX probably better as a state enum
     error: Option<WfError>,
 }
 
-impl WfExecutor {
-    pub fn new(w: Workflow) -> WfExecutor {
+impl<T> WfExecutor<T>
+where
+    T: Debug + Send + Sync,
+{
+    pub fn new(w: Workflow<T>, wfstate: Arc<T>) -> WfExecutor<T> {
         WfExecutor {
             graph: w.graph,
             launchers: w.launchers,
             running: BTreeMap::new(),
             finished: BTreeSet::new(),
             ready: vec![w.root],
+            wfstate,
             error: None,
         }
     }
 }
 
-impl Future for WfExecutor {
+impl<T> Future for WfExecutor<T>
+where
+    T: Debug + Send + Sync + 'static,
+{
     type Output = WfResult;
 
     fn poll<'a>(
-        mut self: Pin<&'a mut WfExecutor>,
+        mut self: Pin<&'a mut WfExecutor<T>>,
         cx: &'a mut Context<'_>,
     ) -> Poll<WfResult> {
         let mut recheck = false;
@@ -534,7 +617,7 @@ impl Future for WfExecutor {
                     .launchers
                     .remove(&node)
                     .expect("missing action for node");
-                let fut = wfaction.do_it();
+                let fut = wfaction.do_it(Arc::clone(&self.wfstate));
                 let boxed = fut.boxed();
                 self.running.insert(node, boxed);
                 recheck = true;
@@ -563,6 +646,7 @@ impl Future for WfExecutor {
 mod test {
     use super::make_provision_workflow;
     use super::WfExecutor;
+    use std::sync::Arc;
 
     /*
      * Exercises much of the code here by constructing the demo provision
@@ -571,11 +655,17 @@ mod test {
      */
     #[tokio::test]
     async fn test_make_provision() {
-        let w = make_provision_workflow();
+        let (w, init_state) = make_provision_workflow();
         eprintln!("{:?}", w);
+        {
+            let st = init_state.lock().await;
+            eprintln!("{:?}", *st);
+        }
         eprintln!("{:?}", petgraph::dot::Dot::new(&w.graph));
 
-        let e = WfExecutor::new(w);
+        let e = WfExecutor::new(w, Arc::clone(&init_state));
         e.await.unwrap();
+        let st = init_state.lock().await;
+        eprintln!("final state: {:?}", *st);
     }
 }
