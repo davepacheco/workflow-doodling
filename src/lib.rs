@@ -68,12 +68,20 @@
  *   - blast radius?
  *   - pausing
  *   - summary of current state a la Manta resharder
- * - revisit static typing in the construction and execution of the graph?  We
- *   could say that each node has its own input type and maybe use a macro to
- *   make that ergonomic (so that people don't have to define a new type for
- *   every stage).  But what about the way they save state?  Or maybe
- *   equivalently: how do we transform the output type from one phase into the
- *   input type for the next?
+ * - revisit static typing in the construction and execution of the graph?
+ *   - It's not even super clear what this will look like until we implement
+ *     persistence with the shared state objects we have.  Right now, this
+ *     static type safety would mean making sure all the nodes in a graph have
+ *     the same state object.  I'd love to also allow subsequent stages to be
+ *     sure that previous stages have completed.
+ *   - One piece of this might be to use macros on the action functions that
+ *     also generate input and output types specific to that function?
+ *     - They'd also need to generate glue code from previous and subsequent
+ *       nodes, it seems.
+ *   - I think we want the Graph data structure to erase the specific
+ *     input/output types as we do today.  But maybe when it's still in the
+ *     builder stage, we keep track of these types so that we can fail at
+ *     compile time when constructing an invalid graph.
  *
  * Persistence is a big question.  Can we get away with persisting _only_ what
  * distributed sagas does: namely, which steps we've started and finished?  As a
@@ -129,6 +137,46 @@
  * Playground links:
  * Simplified version of problem with WfAction::do_it() taking a reference:
  * - https://play.rust-lang.org/?version=stable&mode=debug&edition=2018&gist=09c93f6d2978eb09bed336e9f380d543
+ *
+ * Note on distributed saga implementation (see
+ * https://www.youtube.com/watch?v=0UTOLRTwOX0, around T=23m):
+ * - distributed saga log -- only thing that's persisted
+ *   - "start saga" message includes initial parameter
+ *   - "start saga" node marked complete
+ *   - "start <node>" written to log and acked before executing request
+ *   - "end <node>" written to log _with result of request_ logged and acked
+ *   - write "end saga" message
+ * - failure @ ~27m: this is clear failure of a request that triggers a
+ *   rollback.  write "abort <node>" message, etc.
+ *   - when rolling back node: check log for entries for a node.  If none,
+ *     do nothing and move on.  If there's an abort message, do nothing and move
+ *     on.  If completed successfully, log "start cancel <node>", issue
+ *     compensating request, log "end cancel <node>".  If there's a "start" and
+ *     that's all, then _send it again_, get a response (and log it), _then_
+ *     compensate it (logging that).  (I'm not sure why you can't _just_ cancel
+ *     it.  Asked at 35m45s or so.) OOHH! This guarantees that there's always
+ *     _something_ to cancel -- you never have to cancel something you've never
+ *     heard of.  (That means commutativity isn't quite the right name for the
+ *     property these compensating requests have to have.  What you need is that
+ *     if you've issued the compensating one and subsequently the original
+ *     request is replayed, the result should be that the compensating action
+ *     has happened.)
+ *
+ * Open items from distributed saga log:
+ * - how do you ensure that two executors aren't working concurrently on the
+ *   same saga? (as described, there's a race in checking log and taking action,
+ *   I think).  Maybe we can deal with this by always updating a workflow
+ *   "generation" record every time we add an entry to the log?
+ * - At 30m30s or so, she sort of talks about SEC failure or distribution.
+ *   Sounds like she thinks it all "just works"?
+ * - how do you identify when the coordinator fails and resume elsewhere?
+ *   (discussed around 40m and several more questions about it, but basically
+ *   punted)
+ * - how do any nodes in the graph access output from previous nodes?  from log
+ *   messages?  does that mean we reconstruct this shared state from the log?
+ *
+ * NOTE: this has implication for the shared in-memory state between nodes.  It
+ * needs to be reconstituted from the log.
  */
 
 #![feature(type_name_of_val)]
