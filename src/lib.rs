@@ -313,10 +313,6 @@
  *
  * Next steps here:
  *
- * - Take another look at WfLog and recover_workflow_log().  There's something
- *   fishy here.  wflog.status() is supposed to be a per-node thing, yet we only
- *   keep one per WfLog.  Relatedly, recover_workflow_log() only returns one of
- *   them.
  * - Use the new WfLog interface in WfExecutor::poll() to record "persistent"
  *   state.
  * - Add WfExecutor::recover(), which is somehow given a list of WfEvents and

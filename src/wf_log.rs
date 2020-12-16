@@ -9,6 +9,7 @@ use anyhow::anyhow;
 use anyhow::Context;
 use chrono::DateTime;
 use chrono::Utc;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub type WfNodeId = u64;
@@ -22,7 +23,7 @@ pub type WfNodeId = u64;
  * error details and other debugging state.
  */
 #[derive(Debug)]
-pub enum WfEventType {
+pub enum WfNodeEventType {
     /** The action has started running */
     Started,
     /** The action completed successfully (with output data) */
@@ -68,27 +69,29 @@ impl WfNodeLoadStatus {
     /** Returns the new status for a node after recording the given event. */
     fn next_status(
         &self,
-        event_type: &WfEventType,
+        event_type: &WfNodeEventType,
     ) -> Result<WfNodeLoadStatus, WfError> {
         match (self, event_type) {
-            (WfNodeLoadStatus::NeverStarted, WfEventType::Started) => {
+            (WfNodeLoadStatus::NeverStarted, WfNodeEventType::Started) => {
                 Ok(WfNodeLoadStatus::Started)
             }
-            (WfNodeLoadStatus::Started, WfEventType::Succeeded(out)) => {
+            (WfNodeLoadStatus::Started, WfNodeEventType::Succeeded(out)) => {
                 Ok(WfNodeLoadStatus::Succeeded(Arc::clone(&out)))
             }
-            (WfNodeLoadStatus::Started, WfEventType::Failed) => {
+            (WfNodeLoadStatus::Started, WfNodeEventType::Failed) => {
                 Ok(WfNodeLoadStatus::Failed)
             }
-            (WfNodeLoadStatus::Succeeded(_), WfEventType::CancelStarted) => {
+            (
+                WfNodeLoadStatus::Succeeded(_),
+                WfNodeEventType::CancelStarted,
+            ) => Ok(WfNodeLoadStatus::CancelStarted),
+            (WfNodeLoadStatus::Failed, WfNodeEventType::CancelStarted) => {
                 Ok(WfNodeLoadStatus::CancelStarted)
             }
-            (WfNodeLoadStatus::Failed, WfEventType::CancelStarted) => {
-                Ok(WfNodeLoadStatus::CancelStarted)
-            }
-            (WfNodeLoadStatus::CancelStarted, WfEventType::CancelFinished) => {
-                Ok(WfNodeLoadStatus::CancelFinished)
-            }
+            (
+                WfNodeLoadStatus::CancelStarted,
+                WfNodeEventType::CancelFinished,
+            ) => Ok(WfNodeLoadStatus::CancelFinished),
             _ => Err(anyhow!(
                 "workflow node with status \"{}\": event \"{}\" is illegal"
             )),
@@ -99,7 +102,7 @@ impl WfNodeLoadStatus {
 /**
  * An entry in the workflow log
  */
-pub struct WfEvent {
+pub struct WfNodeEvent {
     /** id of the workflow */
     workflow_id: WfId,
     /** id of the workflow node */
@@ -107,7 +110,7 @@ pub struct WfEvent {
     /** when this event was recorded (for debugging) */
     event_time: DateTime<Utc>,
     /** what's indicated by this event */
-    event_type: WfEventType,
+    event_type: WfNodeEventType,
     /** creator of this event (e.g., a hostname, for debugging) */
     creator: String,
 }
@@ -115,12 +118,17 @@ pub struct WfEvent {
 /**
  * Write to a workflow's log
  */
+// TODO This structure is used both for writing to the log and recovering the
+// log.  There are some similarities.  However, it might be useful to enforce
+// that you're only doing one of these at a time by having these by separate
+// types, with the recovery one converting into WfLog when you're done with
+// recovery.
 pub struct WfLog {
     // TODO include version here
     workflow_id: WfId,
     creator: String,
-    events: Vec<WfEvent>,
-    status: WfNodeLoadStatus,
+    events: Vec<WfNodeEvent>,
+    node_status: BTreeMap<WfNodeId, WfNodeLoadStatus>,
 }
 
 impl WfLog {
@@ -129,16 +137,16 @@ impl WfLog {
             workflow_id,
             creator,
             events: Vec::new(),
-            status: WfNodeLoadStatus::NeverStarted,
+            node_status: BTreeMap::new(),
         }
     }
 
     pub async fn record_now(
         &mut self,
         node_id: WfNodeId,
-        event_type: WfEventType,
+        event_type: WfNodeEventType,
     ) -> Result<(), WfError> {
-        let event = WfEvent {
+        let event = WfNodeEvent {
             workflow_id: self.workflow_id,
             node_id,
             event_time: Utc::now(),
@@ -149,13 +157,17 @@ impl WfLog {
         Ok(self.record(event).expect("illegal event"))
     }
 
-    fn record(&mut self, event: WfEvent) -> Result<(), WfError> {
-        let event_type = &event.event_type;
-        let next_status = self.status.next_status(event_type)?;
+    fn record(&mut self, event: WfNodeEvent) -> Result<(), WfError> {
+        let current_status = self.load_status_for_node(event.node_id);
+        let next_status = current_status.next_status(&event.event_type)?;
 
+        self.node_status.insert(event.node_id, next_status);
         self.events.push(event);
-        self.status = next_status;
         Ok(())
+    }
+
+    pub fn load_status_for_node(&self, node_id: WfNodeId) -> &WfNodeLoadStatus {
+        self.node_status.get(&node_id).unwrap_or(&WfNodeLoadStatus::NeverStarted)
     }
 }
 
@@ -165,10 +177,27 @@ impl WfLog {
  */
 pub fn recover_workflow_log(
     wflog: &mut WfLog,
-    mut events: Vec<WfEvent>,
-) -> Result<WfNodeLoadStatus, WfError> {
+    mut events: Vec<WfNodeEvent>,
+) -> Result<(), WfError> {
+    /*
+     * This is our runtime way of ensuring you don't go from write-mode to
+     * recovery mode.  See the TODO on WfLog above -- we could enforce this at
+     * compile time instead.
+     */
     assert!(wflog.events.is_empty());
 
+    /*
+     * Sort the events by the event type.  This ensures that if there's at least
+     * one valid sequence of events, then we'll replay the events in a valid
+     * sequence.  Thus, if we fail to replay below, then the log is corrupted
+     * somehow.  (Remember, the wall timestamp is never used for correctness.)
+     * For debugging purposes, this is a little disappointing: most likely, the
+     * events are already in a valid order that reflects when they actually
+     * happened.  However, there's nothing to guarantee that unless we make it
+     * so, and our simple approach for doing so here destroys the sequential
+     * order.  This should only really matter for a person looking at the
+     * sequence of entries (as they appear in memory) for debugging.
+     */
     events.sort_by_key(|f| match f.event_type {
         /*
          * TODO Is there a better way to do this?  We want to sort by the event
@@ -179,18 +208,21 @@ pub fn recover_workflow_log(
          * PartialOrd.  It seems like that means we have to implement this by
          * hand.
          */
-        WfEventType::Started => 1,
-        WfEventType::Succeeded(_) => 2,
-        WfEventType::Failed => 3,
-        WfEventType::CancelStarted => 4,
-        WfEventType::CancelFinished => 5,
+        WfNodeEventType::Started => 1,
+        WfNodeEventType::Succeeded(_) => 2,
+        WfNodeEventType::Failed => 3,
+        WfNodeEventType::CancelStarted => 4,
+        WfNodeEventType::CancelFinished => 5,
     });
 
+    /*
+     * Replay the events for this workflow.
+     */
     for event in events {
         wflog.record(event).with_context(|| "recovering workflow log")?;
     }
 
-    Ok(wflog.status.clone())
+    Ok(())
 }
 
 //
