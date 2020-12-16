@@ -499,7 +499,7 @@ async fn demo_prov_server_reserve(wfctx: Arc<WfContext>) -> WfResult {
     eprintln!("    reserve server");
     let server_id = *wfctx.lookup::<u64>("server_id")?;
     assert_eq!(server_id, 1212);
-    // XXX This is a janky way to provide output from workflow
+    // XXX This is a janky way to provide output from the workflow itself
     Ok(Arc::new(ServerAllocResult {
         server_id,
     }))
@@ -681,11 +681,6 @@ impl Debug for Workflow {
 
 /*
  * Construct a demo "provision" workflow matching the description above.
- * TODO maybe the Workflow should include the initial state object instead of
- * returning a tuple here?
- * Should Workflow be Clone and require that the initial state here be Clone?
- * I'm not sure it's possible to say only the initial state be Clone and not all
- * of the intermediate states.
  */
 pub fn make_provision_workflow() -> Workflow {
     let mut w = WfBuilder::new();
@@ -726,7 +721,11 @@ pub struct WfExecutor {
     running: BTreeMap<NodeIndex, BoxFuture<'static, WfResult>>,
     finished: BTreeMap<NodeIndex, WfOutput>,
     ready: Vec<NodeIndex>,
-    // TODO This is really janky.
+    //
+    // TODO This is really janky.  It's here just to have a way to get the
+    // output of the workflow as a whole based on the output of the last node
+    // completed.
+    //
     last: NodeIndex,
 
     // TODO probably better as a state enum
@@ -748,6 +747,12 @@ impl WfExecutor {
         }
     }
 
+    /*
+     * The "ancestor tree" for a node is a Map whose keys are strings that
+     * identify ancestor nodes in the graph and whose values represent the
+     * outputs from those nodes.  See where we call this function for more
+     * details.
+     */
     fn make_ancestor_tree(
         &self,
         tree: &mut BTreeMap<String, WfOutput>,
