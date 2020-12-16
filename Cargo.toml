@@ -9,7 +9,6 @@ anyhow = "1.0.34"
 async-trait = "0.1.42"
 futures = "0.3.8"
 petgraph = "0.5.1"
-uuid = "0.8.1"
 
 [dependencies.chrono]
 version = "0.4"
@@ -22,3 +21,7 @@ features = [ "max_level_trace", "release_max_level_debug" ]
 [dependencies.tokio]
 version = "0.3"
 features = [ "full" ]
+
+[dependencies.uuid]
+version = "0.8.1"
+features = [ "serde", "v4" ]

@@ -132,10 +132,10 @@ pub struct WfLog {
 }
 
 impl WfLog {
-    pub fn new(creator: String, workflow_id: WfId) -> WfLog {
+    pub fn new(creator: &str, workflow_id: WfId) -> WfLog {
         WfLog {
             workflow_id,
-            creator,
+            creator: creator.to_string(),
             events: Vec::new(),
             node_status: BTreeMap::new(),
         }
@@ -167,7 +167,9 @@ impl WfLog {
     }
 
     pub fn load_status_for_node(&self, node_id: WfNodeId) -> &WfNodeLoadStatus {
-        self.node_status.get(&node_id).unwrap_or(&WfNodeLoadStatus::NeverStarted)
+        self.node_status
+            .get(&node_id)
+            .unwrap_or(&WfNodeLoadStatus::NeverStarted)
     }
 }
 
