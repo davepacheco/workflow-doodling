@@ -317,6 +317,7 @@
 #![feature(option_expect_none)]
 #![deny(elided_lifetimes_in_paths)]
 
+use anyhow::anyhow;
 use core::any::Any;
 use core::fmt;
 use core::fmt::Debug;
@@ -334,8 +335,6 @@ use petgraph::Outgoing;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::anyhow;
-
 #[macro_use]
 extern crate async_trait;
 
@@ -350,7 +349,7 @@ pub struct WfContext {
 }
 
 impl WfContext {
-    fn lookup<T: Send + Sync + 'static>(
+    pub fn lookup<T: Send + Sync + 'static>(
         &self,
         name: &str,
     ) -> Result<Arc<T>, WfError> {
@@ -364,7 +363,7 @@ impl WfContext {
         Ok(specific_item)
     }
 
-    async fn child_workflow(&self, wf: Workflow) -> WfResult {
+    pub async fn child_workflow(&self, wf: Workflow) -> WfResult {
         /*
          * TODO Really we want this to reach into the parent WfExecutor and make
          * a record about this new execution.  This is mostly for observability
@@ -379,11 +378,11 @@ impl WfContext {
 }
 
 #[async_trait]
-trait WfAction: Debug + Send {
+pub trait WfAction: Debug + Send {
     async fn do_it(self: Box<Self>, wfctx: Arc<WfContext>) -> WfResult;
 }
 
-struct WfActionFunc<FutType, FuncType>
+pub struct WfActionFunc<FutType, FuncType>
 where
     FuncType: Fn(Arc<WfContext>) -> FutType + Send + 'static,
     FutType: Future<Output = WfResult> + Send + 'static,
@@ -397,7 +396,7 @@ where
     FuncType: Fn(Arc<WfContext>) -> FutType + Send + 'static,
     FutType: Future<Output = WfResult> + Send + 'static,
 {
-    fn new_action(f: FuncType) -> Box<dyn WfAction> {
+    pub fn new_action(f: FuncType) -> Box<dyn WfAction> {
         Box::new(WfActionFunc {
             func: f,
             phantom: PhantomData,
@@ -430,123 +429,6 @@ where
 }
 
 /*
- * Demo provision workflow:
- *
- *          create instance (database)
- *              |  |  |
- *       +------+  +  +-------------+
- *       |         |                |
- *       v         v                v
- *    alloc IP   create volume    pick server
- *       |         |                |
- *       +------+--+                v
- *              |             allocate server resources
- *              |                   |
- *              +-------------------+
- *              |
- *              v
- *          configure instance (server)
- *              |
- *              v
- *          attach volume
- *              |
- *              v
- *          boot instance
- */
-
-async fn demo_prov_instance_create(_wfctx: Arc<WfContext>) -> WfResult {
-    eprintln!("create instance");
-    let instance_id = 1211u64;
-    Ok(Arc::new(instance_id))
-}
-
-async fn demo_prov_vpc_alloc_ip(wfctx: Arc<WfContext>) -> WfResult {
-    eprintln!("allocate IP");
-    let ip = String::from("10.120.121.122");
-    let instance_id = wfctx.lookup::<u64>("instance_id")?;
-    assert_eq!(*instance_id, 1211);
-    Ok(Arc::new(ip))
-}
-
-/*
- * The next two steps are in a subworkflow!
- */
-async fn demo_prov_server_alloc(wfctx: Arc<WfContext>) -> WfResult {
-    eprintln!("allocate server (subworkflow)");
-
-    let mut w = WfBuilder::new();
-    w.append("server_id", WfActionFunc::new_action(demo_prov_server_pick));
-    w.append(
-        "server_reserve",
-        WfActionFunc::new_action(demo_prov_server_reserve),
-    );
-    let wf = w.build();
-
-    let result = wfctx.child_workflow(wf).await?;
-    Ok(Arc::new(result.downcast::<ServerAllocResult>().unwrap().server_id))
-}
-
-struct ServerAllocResult {
-    server_id: u64,
-}
-
-async fn demo_prov_server_pick(_wfctx: Arc<WfContext>) -> WfResult {
-    eprintln!("    pick server");
-    let server_id = 1212u64;
-    Ok(Arc::new(server_id))
-}
-async fn demo_prov_server_reserve(wfctx: Arc<WfContext>) -> WfResult {
-    eprintln!("    reserve server");
-    let server_id = *wfctx.lookup::<u64>("server_id")?;
-    assert_eq!(server_id, 1212);
-    // XXX This is a janky way to provide output from the workflow itself
-    Ok(Arc::new(ServerAllocResult {
-        server_id,
-    }))
-}
-
-async fn demo_prov_volume_create(wfctx: Arc<WfContext>) -> WfResult {
-    eprintln!("create volume");
-    let volume_id = 1213u64;
-    assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
-    Ok(Arc::new(volume_id))
-}
-async fn demo_prov_instance_configure(wfctx: Arc<WfContext>) -> WfResult {
-    eprintln!("configure instance");
-    assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
-    assert_eq!(*wfctx.lookup::<u64>("volume_id")?, 1213);
-    Ok(Arc::new(()))
-}
-async fn demo_prov_volume_attach(wfctx: Arc<WfContext>) -> WfResult {
-    eprintln!("attach volume");
-    assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
-    assert_eq!(*wfctx.lookup::<u64>("volume_id")?, 1213);
-    Ok(Arc::new(()))
-}
-async fn demo_prov_instance_boot(wfctx: Arc<WfContext>) -> WfResult {
-    eprintln!("boot instance");
-    assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
-    assert_eq!(*wfctx.lookup::<u64>("volume_id")?, 1213);
-    Ok(Arc::new(()))
-}
-
-async fn demo_prov_print(wfctx: Arc<WfContext>) -> WfResult {
-    eprintln!("printing final state:");
-    let instance_id = wfctx.lookup::<u64>("instance_id")?;
-    eprintln!("  instance id: {}", *instance_id);
-    let ip = wfctx.lookup::<String>("instance_ip")?;
-    eprintln!("  IP address: {}", *ip);
-    let volume_id = wfctx.lookup::<u64>("volume_id")?;
-    eprintln!("  volume id: {}", *volume_id);
-    let server_id = wfctx.lookup::<u64>("server_id")?;
-    eprintln!("  server id: {}", *server_id);
-    Ok(Arc::new(()))
-}
-
-/*
  * WfBuilder is an interface for constructing a workflow graph.  See `append()`
  * and `append_parallel()` for more.
  */
@@ -572,7 +454,7 @@ impl WfAction for WfActionUniversalFirst {
 }
 
 impl WfBuilder {
-    fn new() -> WfBuilder {
+    pub fn new() -> WfBuilder {
         let mut graph = Graph::new();
         let mut launchers = BTreeMap::new();
         let node_names = BTreeMap::new();
@@ -596,7 +478,7 @@ impl WfBuilder {
      * This action will depend on completion of all actions in the previous
      * phase.
      */
-    fn append(&mut self, name: &str, action: Box<dyn WfAction>) {
+    pub fn append(&mut self, name: &str, action: Box<dyn WfAction>) {
         let label = format!("{:?}", action);
         let newnode = self.graph.add_node(label);
         self.launchers
@@ -617,7 +499,7 @@ impl WfBuilder {
      * may run concurrently.  These actions will individually depend on all
      * actions in the previous phase having been completed.
      */
-    fn append_parallel(&mut self, actions: Vec<(&str, Box<dyn WfAction>)>) {
+    pub fn append_parallel(&mut self, actions: Vec<(&str, Box<dyn WfAction>)>) {
         let newnodes: Vec<NodeIndex> = actions
             .into_iter()
             .map(|(n, a)| {
@@ -656,7 +538,7 @@ impl WfBuilder {
         self.last = newnodes;
     }
 
-    fn build(self) -> Workflow {
+    pub fn build(self) -> Workflow {
         Workflow {
             graph: self.graph,
             launchers: self.launchers,
@@ -675,39 +557,12 @@ pub struct Workflow {
 
 impl Debug for Workflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Workflow").field("graph", &self.graph).finish()
+        let dot = petgraph::dot::Dot::new(&self.graph);
+        f.debug_struct("Workflow")
+            .field("graph", &self.graph)
+            .field("dot", &dot)
+            .finish()
     }
-}
-
-/*
- * Construct a demo "provision" workflow matching the description above.
- */
-pub fn make_provision_workflow() -> Workflow {
-    let mut w = WfBuilder::new();
-
-    w.append(
-        "instance_id",
-        WfActionFunc::new_action(demo_prov_instance_create),
-    );
-    w.append_parallel(vec![
-        ("instance_ip", WfActionFunc::new_action(demo_prov_vpc_alloc_ip)),
-        ("volume_id", WfActionFunc::new_action(demo_prov_volume_create)),
-        ("server_id", WfActionFunc::new_action(demo_prov_server_alloc)),
-    ]);
-    w.append(
-        "instance_configure",
-        WfActionFunc::new_action(demo_prov_instance_configure),
-    );
-    w.append(
-        "volume_attach",
-        WfActionFunc::new_action(demo_prov_volume_attach),
-    );
-    w.append(
-        "instance_boot",
-        WfActionFunc::new_action(demo_prov_instance_boot),
-    );
-    w.append("print", WfActionFunc::new_action(demo_prov_print));
-    w.build()
 }
 
 /*
@@ -924,26 +779,5 @@ impl Future for WfExecutor {
         } else {
             Poll::Pending
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::make_provision_workflow;
-    use super::WfExecutor;
-
-    /*
-     * Exercises much of the code here by constructing the demo provision
-     * workflow.  We print the "Dot"-format graph to stderr so that we can
-     * visually inspect the result.
-     */
-    #[tokio::test]
-    async fn test_make_provision() {
-        let w = make_provision_workflow();
-        eprintln!("{:?}", w);
-        eprintln!("{:?}", petgraph::dot::Dot::new(&w.graph));
-        let e = WfExecutor::new(w);
-        e.await.unwrap();
-        // XXX need way to extract output
     }
 }
