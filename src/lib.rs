@@ -439,7 +439,7 @@ pub struct WfBuilder {
     launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     node_names: BTreeMap<NodeIndex, String>,
     root: NodeIndex,
-    last: Vec<NodeIndex>,
+    last_added: Vec<NodeIndex>,
 }
 
 #[derive(Debug)]
@@ -469,7 +469,7 @@ impl WfBuilder {
             launchers,
             root,
             node_names,
-            last: vec![root],
+            last_added: vec![root],
         }
     }
 
@@ -487,11 +487,11 @@ impl WfBuilder {
         self.node_names
             .insert(newnode, name.to_string())
             .expect_none("name already used in this workflow");
-        for node in &self.last {
+        for node in &self.last_added {
             self.graph.add_edge(*node, newnode, ());
         }
 
-        self.last = vec![newnode];
+        self.last_added = vec![newnode];
     }
 
     /*
@@ -529,13 +529,13 @@ impl WfBuilder {
          * to, and then edges from this intermediate node to the next set of
          * parallel nodes.
          */
-        for node in &self.last {
+        for node in &self.last_added {
             for newnode in &newnodes {
                 self.graph.add_edge(*node, *newnode, ());
             }
         }
 
-        self.last = newnodes;
+        self.last_added = newnodes;
     }
 
     pub fn build(self) -> Workflow {
@@ -581,7 +581,7 @@ pub struct WfExecutor {
     // output of the workflow as a whole based on the output of the last node
     // completed.
     //
-    last: NodeIndex,
+    last_finished: NodeIndex,
 
     // TODO probably better as a state enum
     error: Option<WfError>,
@@ -594,7 +594,7 @@ impl WfExecutor {
             launchers: w.launchers,
             node_names: w.node_names,
             root: w.root,
-            last: w.root,
+            last_finished: w.root,
             running: BTreeMap::new(),
             finished: BTreeMap::new(),
             ready: vec![w.root],
@@ -660,7 +660,9 @@ impl Future for WfExecutor {
         if self.finished.len() == self.graph.node_count() {
             // TODO Besides being janky, this will probably blow up for the case
             // of an empty workflow.
-            return Poll::Ready(Ok(Arc::clone(&self.finished[&self.last])));
+            return Poll::Ready(Ok(Arc::clone(
+                &self.finished[&self.last_finished],
+            )));
         }
 
         /*
@@ -737,7 +739,7 @@ impl Future for WfExecutor {
                     self.ready.push(depnode);
                 }
 
-                self.last = node;
+                self.last_finished = node;
             }
         }
 

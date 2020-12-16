@@ -24,7 +24,6 @@
  */
 
 use std::sync::Arc;
-use workflow_doodling::WfAction;
 use workflow_doodling::WfActionFunc;
 use workflow_doodling::WfBuilder;
 use workflow_doodling::WfContext;
