@@ -177,6 +177,121 @@
  *
  * NOTE: this has implication for the shared in-memory state between nodes.  It
  * needs to be reconstituted from the log.
+ *
+ * [2020-12-15]
+ * Regarding persistence: the closest analog to what's described in the
+ * distributed sagas talk is that each workflow action produces a structure that
+ * can be persisted in the saga log.  That's easy enough (if a bit of a pain):
+ * WfResult's output type can be a "Box<dyn Serialize>" or the like.  This
+ * approach has the problem mentioned above, which is that it's very easy to
+ * write an action that first creates a random uuid and then creates it in the
+ * database.  This is not idempotent because if we crash after that but before
+ * we persist the result, then we'll end up running the action again and
+ * creating a second record (and likely leaking the first).  However, this
+ * approach can at least work and let us make forward progress on other parts of
+ * the system.
+ *
+ * There's a second problem here, which is: how is that state made available to
+ * the compensation action (which seems relatively easy) or other actions in the
+ * workflow DAG (which seems tricky)?  If it were all dynamically-typed, we
+ * could use key-value pairs with `Arc<dyn Any>` for the value...but how awful
+ * is that.  Can we really not do better?
+ *
+ * The current prototype uses a single shared state struct for the whole
+ * workflow.  This is easy enough to express, but then persistence becomes
+ * a little tricky.  I guess we could save a new copy to the log any time an
+ * action completes.  Of course, the act of saving it probably requires taking a
+ * Mutex in practice, and how do we do that in the context of serialize?  I
+ * suppose we could require that the struct provide a serialize-like entry point
+ * that takes the lock and serializes itself.  It's starting to feel nasty.
+ *
+ * If we instead say that workflow actions can only persist data by returning
+ * it, and that they can only access previously-persisted data using a special
+ * interface, then we can take care of concurrency.  The request to fetch data
+ * would be asynchronous and infallible by default (panicking if the data is
+ * missing or has the wrong type, possibly with a try_() version if we want
+ * something to be optional).  By being async, that gives the implementation
+ * flexibility to use a lock or a channel or something else.
+ *
+ * But how does the caller specify what they're asking for?  This is the most
+ * obvious:
+ *
+ *     let ip: IpAddr = wfctx.lookup("instance_ip").await;
+ *
+ * but then how do we know what data that corresponds to?  One option is the
+ * previous stage had to do:
+ *
+ *     wfctx.store("instance_ip", ip_addr);
+ *
+ * and that would be infallible.
+ *
+ * This isn't as ergonomic as simply being able to return the item from the
+ * Workflow action.  And it's easy to get this wrong (e.g., typo in the property
+ * name).  That could be an enum...but the enum's type would be different for
+ * different workflows, which means you need adapters of some kind for composing
+ * workflows.  We already have that, so maybe that's not so bad.
+ *
+ * One nice thing about this is that you can define crisp interfaces between
+ * actions.  You can say:
+ *
+ *     struct VipAllocation {
+ *         vpc_id: Uuid,
+ *         ip: IpAddr,
+ *         subnet: Subnet,
+ *     }
+ *
+ *     ...
+ *
+ *     wfctx.store("instance_vip", vip_allocation);
+ *
+ *     ...
+ *
+ *     let ip: IpAddr = wfctx.lookup::<VipAllocation>("instance_vip").await.ip;
+ *
+ * This way, the interface between actions can be a stable interface, not just
+ * whatever happened to be convenient.
+ *
+ * If we're going this far, what if we get rid of the key altogether and make
+ * you use an interface like this to access the shared state?  So it looks like
+ * this:
+ *
+ *     //
+ *     // I'm making this fallible now so that we can abort the workflow at this
+ *     // point if we want to.  We could still panic on type errors.
+ *     //
+ *     let my_state: ProvisionVmWorkflowState = wfctx.state().await?;
+ *     // Manipulate my_state as desired.  One implementation is that you've got
+ *     // a lock held at this point.  (What happens if you drop the lock before
+ *     // completing the workflow action?  We don't want to persist that
+ *     // intermediate state -- then we don't have any of the guarantees of
+ *     // distributed sagas.  But if you've changed it, and other stages can see
+ *     // that, that's bad!  Speaking of this: we have an opportunity here to
+ *     // absolutely prevent workflow actions from seeing data they shouldn't,
+ *     // even if it's technically available, because we have the ability to
+ *     // know which DAG node produced it and so whether it should be visible to
+ *     // another node.  This might be too ambitious, but it seems like a really
+ *     // valuable way to catch an important class of programmer error!
+ *
+ * This last point sends me back towards having each action return just a small
+ * chunk of state, not make arbitrary modifications to the whole workflow state.
+ * But the question remains: how is that state made available to subsequent
+ * actions?  At the end of the day, the subsequent action has got to refer to
+ * that by some sort of name.  That can either be statically resolved (e.g., a
+ * structure field) or dynamically (e.g., lookup in a tree).  The static option
+ * seems hard, at least right now -- it means every action needs its own input
+ * type that presumably we'd want to autogenerate based on the fields it uses
+ * or macro arguments or something.  If we go the dynamic route, how do we name
+ * the "key"?  One idea is the one mentioned above -- the generating action
+ * stores it with an explicit key name.  Another idea is that it's a property of
+ * the action itself -- i.e., when you create the node (or add it to the graph),
+ * you give it a name, and its return value becomes the value that a subsequent
+ * node can lookup based on the node's name.  One downside to this is that the
+ * structure of actions in the graph determines how this data is accessed --
+ * i.e., if you split one action into two, then consumers need to be updated to
+ * reflect that (unless you add a new node that combines the data from the other
+ * two nodes).
+ *
+ * Maybe this is the way to go for now.
  */
 
 #![feature(type_name_of_val)]
