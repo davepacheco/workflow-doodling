@@ -62,13 +62,13 @@ pub fn make_provision_workflow() -> Workflow {
     w.build()
 }
 
-async fn demo_prov_instance_create(_wfctx: Arc<WfContext>) -> WfResult {
+async fn demo_prov_instance_create(_wfctx: WfContext) -> WfResult {
     eprintln!("create instance");
     let instance_id = 1211u64;
     Ok(Arc::new(instance_id))
 }
 
-async fn demo_prov_vpc_alloc_ip(wfctx: Arc<WfContext>) -> WfResult {
+async fn demo_prov_vpc_alloc_ip(wfctx: WfContext) -> WfResult {
     eprintln!("allocate IP");
     let ip = String::from("10.120.121.122");
     let instance_id = wfctx.lookup::<u64>("instance_id")?;
@@ -79,7 +79,7 @@ async fn demo_prov_vpc_alloc_ip(wfctx: Arc<WfContext>) -> WfResult {
 /*
  * The next two steps are in a subworkflow!
  */
-async fn demo_prov_server_alloc(wfctx: Arc<WfContext>) -> WfResult {
+async fn demo_prov_server_alloc(wfctx: WfContext) -> WfResult {
     eprintln!("allocate server (subworkflow)");
 
     let mut w = WfBuilder::new();
@@ -98,12 +98,12 @@ struct ServerAllocResult {
     server_id: u64,
 }
 
-async fn demo_prov_server_pick(_wfctx: Arc<WfContext>) -> WfResult {
+async fn demo_prov_server_pick(_wfctx: WfContext) -> WfResult {
     eprintln!("    pick server");
     let server_id = 1212u64;
     Ok(Arc::new(server_id))
 }
-async fn demo_prov_server_reserve(wfctx: Arc<WfContext>) -> WfResult {
+async fn demo_prov_server_reserve(wfctx: WfContext) -> WfResult {
     eprintln!("    reserve server");
     let server_id = *wfctx.lookup::<u64>("server_id")?;
     assert_eq!(server_id, 1212);
@@ -113,27 +113,27 @@ async fn demo_prov_server_reserve(wfctx: Arc<WfContext>) -> WfResult {
     }))
 }
 
-async fn demo_prov_volume_create(wfctx: Arc<WfContext>) -> WfResult {
+async fn demo_prov_volume_create(wfctx: WfContext) -> WfResult {
     eprintln!("create volume");
     let volume_id = 1213u64;
     assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
     Ok(Arc::new(volume_id))
 }
-async fn demo_prov_instance_configure(wfctx: Arc<WfContext>) -> WfResult {
+async fn demo_prov_instance_configure(wfctx: WfContext) -> WfResult {
     eprintln!("configure instance");
     assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
     assert_eq!(*wfctx.lookup::<u64>("volume_id")?, 1213);
     Ok(Arc::new(()))
 }
-async fn demo_prov_volume_attach(wfctx: Arc<WfContext>) -> WfResult {
+async fn demo_prov_volume_attach(wfctx: WfContext) -> WfResult {
     eprintln!("attach volume");
     assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
     assert_eq!(*wfctx.lookup::<u64>("volume_id")?, 1213);
     Ok(Arc::new(()))
 }
-async fn demo_prov_instance_boot(wfctx: Arc<WfContext>) -> WfResult {
+async fn demo_prov_instance_boot(wfctx: WfContext) -> WfResult {
     eprintln!("boot instance");
     assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
@@ -141,7 +141,7 @@ async fn demo_prov_instance_boot(wfctx: Arc<WfContext>) -> WfResult {
     Ok(Arc::new(()))
 }
 
-async fn demo_prov_print(wfctx: Arc<WfContext>) -> WfResult {
+async fn demo_prov_print(wfctx: WfContext) -> WfResult {
     eprintln!("printing final state:");
     let instance_id = wfctx.lookup::<u64>("instance_id")?;
     eprintln!("  instance id: {}", *instance_id);

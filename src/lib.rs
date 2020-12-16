@@ -339,16 +339,67 @@ use std::sync::Arc;
 extern crate async_trait;
 
 /* Widely-used types (within workflows) */
+
+/** Error produced by a workflow action or a workflow itself */
 pub type WfError = anyhow::Error;
+/** Output produced on success by a workflow action or the workflow itself */
 pub type WfOutput = Arc<dyn Any + Send + Sync + 'static>;
 pub type WfResult = Result<WfOutput, WfError>;
 
+/**
+ * Building blocks of workflows
+ *
+ * Each action consumes a [`WfContext`] and asynchronously produces a
+ * [`WfResult`].  A workflow is essentially a directed acyclic graph of actions
+ * with dependencies between them.
+ */
+#[async_trait]
+pub trait WfAction: Debug + Send {
+    /**
+     * Executes the action for this workflow node, whatever that is.  Actions
+     * function like requests in distributed sagas: critically, they must be
+     * idempotent.  They should be very careful in using interfaces outside of
+     * [`WfContext`] -- we want them to be as self-contained as possible to
+     * ensure idempotence and to minimize versioning issues.
+     *
+     * On success, this function produces a `WfOutput`, which is just `Arc<dyn
+     * Any + ...>`.  This output will be stored persistently, keyed by the
+     * _name_ of the current workflow node.  Subsequent stages can access this
+     * data with [`WfContext::lookup`].  This is the _only_ supported means of
+     * sharing state across actions within a workflow.
+     */
+    async fn do_it(self: Box<Self>, wfctx: WfContext) -> WfResult;
+}
+
+/**
+ * Action's handle to the workflow subsystem
+ *
+ * Any APIs that are useful for actions should hang off this object.  It should
+ * have enough state to know which node is invoking the API.
+ */
 pub struct WfContext {
-    node: NodeIndex,
     ancestor_tree: BTreeMap<String, WfOutput>,
 }
 
 impl WfContext {
+    /**
+     * Retrieves a piece of data stored by a previous (ancestor) node in the
+     * current workflow.  The data is identified by `name`.
+     *
+     * Data is returned as `Arc<T>` (as opposed to `T`) because all descendant
+     * nodes have access to the data stored by a node (so there may be many
+     * references).  Once stored, a given piece of data is immutable.
+     *
+     *
+     * # Panics
+     *
+     * This function panics if there was no data previously stored with name
+     * `name` or if the type of that data was not `T`.  (Data is stored as
+     * `Arc<dyn Any>` and downcast to `T` here.)  The assumption here is actions
+     * within a workflow are tightly coupled, so the caller knows exactly what
+     * the previous action stored.  We would enforce this at compile time if we
+     * could.
+     */
     pub fn lookup<T: Send + Sync + 'static>(
         &self,
         name: &str,
@@ -363,6 +414,14 @@ impl WfContext {
         Ok(specific_item)
     }
 
+    /**
+     * Execute a new workflow `wf` and wait for it to complete.  `wf` is
+     * considered a "child" workflow of the current workflow.
+     * TODO Is there some way to prevent people from instantiating their own
+     * WfExecutor by mistake instead?  Even better: if they do that, can we
+     * detect that they're part of a workflow already somehow and make the new
+     * one a child workflow?
+     */
     pub async fn child_workflow(&self, wf: Workflow) -> WfResult {
         /*
          * TODO Really we want this to reach into the parent WfExecutor and make
@@ -377,14 +436,12 @@ impl WfContext {
     }
 }
 
-#[async_trait]
-pub trait WfAction: Debug + Send {
-    async fn do_it(self: Box<Self>, wfctx: Arc<WfContext>) -> WfResult;
-}
-
+/**
+ * [`WfAction`] implementation for functions
+ */
 pub struct WfActionFunc<FutType, FuncType>
 where
-    FuncType: Fn(Arc<WfContext>) -> FutType + Send + 'static,
+    FuncType: Fn(WfContext) -> FutType + Send + 'static,
     FutType: Future<Output = WfResult> + Send + 'static,
 {
     func: FuncType,
@@ -393,9 +450,17 @@ where
 
 impl<FutType, FuncType> WfActionFunc<FutType, FuncType>
 where
-    FuncType: Fn(Arc<WfContext>) -> FutType + Send + 'static,
+    FuncType: Fn(WfContext) -> FutType + Send + 'static,
     FutType: Future<Output = WfResult> + Send + 'static,
 {
+    /**
+     * Wrap a function in a `WfActionFunc`
+     *
+     * We return the result as a `Box<dyn WfAction>` so that it can be used
+     * directly where `WfAction`s are expected.  The struct `WfActionFunc` has
+     * no interfaces of its own so there's generally no need to have the
+     * specific type.
+     */
     pub fn new_action(f: FuncType) -> Box<dyn WfAction> {
         Box::new(WfActionFunc {
             func: f,
@@ -404,53 +469,84 @@ where
     }
 }
 
-impl<FutType, FuncType> Debug for WfActionFunc<FutType, FuncType>
-where
-    FuncType: Fn(Arc<WfContext>) -> FutType + Send + 'static,
-    FutType: Future<Output = WfResult> + Send + 'static,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WfActionFunc")
-            .field("func", &std::any::type_name_of_val(&self.func))
-            .finish()
-    }
-}
-
 #[async_trait]
 impl<FutType, FuncType> WfAction for WfActionFunc<FutType, FuncType>
 where
-    FuncType: Fn(Arc<WfContext>) -> FutType + Send + 'static,
+    FuncType: Fn(WfContext) -> FutType + Send + 'static,
     FutType: Future<Output = WfResult> + Send + 'static,
 {
-    async fn do_it(self: Box<Self>, wfctx: Arc<WfContext>) -> WfResult {
+    async fn do_it(self: Box<Self>, wfctx: WfContext) -> WfResult {
         let fut = { (self.func)(wfctx) };
         fut.await
     }
 }
 
-/*
- * WfBuilder is an interface for constructing a workflow graph.  See `append()`
- * and `append_parallel()` for more.
- */
-#[derive(Debug)]
-pub struct WfBuilder {
-    /* DAG of workflow nodes. */
-    graph: Graph<String, ()>,
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
-    node_names: BTreeMap<NodeIndex, String>,
-    root: NodeIndex,
-    last_added: Vec<NodeIndex>,
+impl<FutType, FuncType> Debug for WfActionFunc<FutType, FuncType>
+where
+    FuncType: Fn(WfContext) -> FutType + Send + 'static,
+    FutType: Future<Output = WfResult> + Send + 'static,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&std::any::type_name_of_val(&self.func))
+    }
 }
 
+/** Placeholder type for the initial node in a graph. */
 #[derive(Debug)]
 struct WfActionUniversalFirst {}
 
 #[async_trait]
 impl WfAction for WfActionUniversalFirst {
-    async fn do_it(self: Box<Self>, _: Arc<WfContext>) -> WfResult {
+    async fn do_it(self: Box<Self>, _: WfContext) -> WfResult {
         eprintln!("universal first action");
         Ok(Arc::new(()))
     }
+}
+
+/**
+ * Describes a directed acyclic graph of actions
+ *
+ * See [`WfBuilder`] to construct a Workflow.  See [`WfExecutor`] to execute
+ * one.
+ */
+pub struct Workflow {
+    graph: Graph<String, ()>,
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
+    node_names: BTreeMap<NodeIndex, String>,
+    root: NodeIndex,
+}
+
+impl Debug for Workflow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let dot = petgraph::dot::Dot::new(&self.graph);
+        f.debug_struct("Workflow")
+            .field("graph", &self.graph)
+            .field("dot", &dot)
+            .finish()
+    }
+}
+
+/**
+ * Construct a workflow graph
+ *
+ * The interface here only supports linear construction using an "append"
+ * operation.  See [`WfBuilder::append`] and [`WfBuilder::append_parallel`].
+ */
+#[derive(Debug)]
+pub struct WfBuilder {
+    /** DAG of workflow nodes.  Weights for nodes are debug labels. */
+    graph: Graph<String, ()>,
+    /** For each node, the [`WfAction`] executed at that node. */
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
+    /**
+     * For each node, the name of the node.  This is used for data stored by
+     * that node.
+     */
+    node_names: BTreeMap<NodeIndex, String>,
+    /** Root node of the graph */
+    root: NodeIndex,
+    /** Last set of nodes added.  This is used when appending to the graph. */
+    last_added: Vec<NodeIndex>,
 }
 
 impl WfBuilder {
@@ -473,10 +569,18 @@ impl WfBuilder {
         }
     }
 
-    /*
-     * Creates a new "phase" of the workflow consisting of a single action.
-     * This action will depend on completion of all actions in the previous
-     * phase.
+    /**
+     * Adds a new node to the graph
+     *
+     * The new node will depend on completion of all actions that were added in
+     * the last call to `append` or `append_parallel`.  (The idea is to `append`
+     * a sequence of steps that run one after another.)
+     *
+     * `action` will be used when this node is being executed.
+     *
+     * The node is called `name`.  This name is used for storing the output of
+     * the action so that descendant nodes can access it using
+     * [`WfContext::lookup`].
      */
     pub fn append(&mut self, name: &str, action: Box<dyn WfAction>) {
         let label = format!("{:?}", action);
@@ -494,10 +598,13 @@ impl WfBuilder {
         self.last_added = vec![newnode];
     }
 
-    /*
-     * Creates a new "phase" of the workflow consisting of a set of actions that
-     * may run concurrently.  These actions will individually depend on all
-     * actions in the previous phase having been completed.
+    /**
+     * Adds a set of nodes to the graph that can be executed concurrently
+     *
+     * The new nodes will individually depend on completion of all actions that
+     * were added in the last call to `append` or `append_parallel`.  `actions`
+     * is a vector of `(name, action)` tuples analogous to the arguments to
+     * [`WfBuilder::append`].
      */
     pub fn append_parallel(&mut self, actions: Vec<(&str, Box<dyn WfAction>)>) {
         let newnodes: Vec<NodeIndex> = actions
@@ -538,6 +645,12 @@ impl WfBuilder {
         self.last_added = newnodes;
     }
 
+    /** Finishes building the Workflow */
+    /*
+     * TODO it's not clear if it's important that this step exist.  Maybe some
+     * workflows could append to themselves while they're running, and that
+     * might be okay?
+     */
     pub fn build(self) -> Workflow {
         Workflow {
             graph: self.graph,
@@ -548,46 +661,46 @@ impl WfBuilder {
     }
 }
 
-pub struct Workflow {
-    graph: Graph<String, ()>,
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
-    node_names: BTreeMap<NodeIndex, String>,
-    root: NodeIndex,
-}
-
-impl Debug for Workflow {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let dot = petgraph::dot::Dot::new(&self.graph);
-        f.debug_struct("Workflow")
-            .field("graph", &self.graph)
-            .field("dot", &dot)
-            .finish()
-    }
-}
-
+/**
+ * Executes a workflow
+ *
+ * `WfExecutor` implements `Future`.  To execute a workflow, use
+ * [`WfExecutor::new`] and then `await` the resulting Future.
+ */
 /*
- * Executes a workflow.
+ * TODO Lots more could be said here, but the basic idea matches distributed
+ * sagas.
+ * This will be a good place to put things like concurrency limits, canarying,
+ * etc.
  */
 pub struct WfExecutor {
+    /* See `Workflow` */
     graph: Graph<String, ()>,
     launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     node_names: BTreeMap<NodeIndex, String>,
     root: NodeIndex,
+
+    /** Futures associated with currently-running nodes */
     running: BTreeMap<NodeIndex, BoxFuture<'static, WfResult>>,
+    /** Outputs stored for nodes that have finished already */
     finished: BTreeMap<NodeIndex, WfOutput>,
+    /** Nodes that have not started but whose dependencies are satisfied */
     ready: Vec<NodeIndex>,
-    //
-    // TODO This is really janky.  It's here just to have a way to get the
-    // output of the workflow as a whole based on the output of the last node
-    // completed.
-    //
+    /** Last node that completed. */
+    /*
+     * TODO This is really janky.  It's here just to have a way to get the
+     * output of the workflow as a whole based on the output of the last node
+     * completed.
+     */
     last_finished: NodeIndex,
 
-    // TODO probably better as a state enum
+    /** First error produced by a node, if any */
+    /* TODO probably better as a state enum.  See poll(). */
     error: Option<WfError>,
 }
 
 impl WfExecutor {
+    /** Create an executor to run the given workflow. */
     pub fn new(w: Workflow) -> WfExecutor {
         WfExecutor {
             graph: w.graph,
@@ -602,11 +715,14 @@ impl WfExecutor {
         }
     }
 
-    /*
-     * The "ancestor tree" for a node is a Map whose keys are strings that
+    /**
+     * Builds the "ancestor tree" for a node whose dependencies have all
+     * completed.
+     *
+     * The ancestor tree for a node is a map whose keys are strings that
      * identify ancestor nodes in the graph and whose values represent the
-     * outputs from those nodes.  See where we call this function for more
-     * details.
+     * outputs from those nodes.  This is used by [`WfContext::lookup`].  See
+     * where we use this function in poll() for more details.
      */
     fn make_ancestor_tree(
         &self,
@@ -755,11 +871,9 @@ impl Future for WfExecutor {
                 let mut ancestor_tree = BTreeMap::new();
                 self.make_ancestor_tree(&mut ancestor_tree, node);
 
-                // TODO can probably drop the outer Arc
-                let fut = wfaction.do_it(Arc::new(WfContext {
-                    node,
+                let fut = wfaction.do_it(WfContext {
                     ancestor_tree,
-                }));
+                });
                 let boxed = fut.boxed();
                 self.running.insert(node, boxed);
                 recheck = true;
