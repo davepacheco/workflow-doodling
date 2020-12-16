@@ -68,6 +68,7 @@
  *   - blast radius?
  *   - pausing
  *   - summary of current state a la Manta resharder
+ *   - policy around what to do on failure (stop, rewind)
  * - revisit static typing in the construction and execution of the graph?
  *   - It's not even super clear what this will look like until we implement
  *     persistence with the shared state objects we have.  Right now, this
@@ -146,7 +147,7 @@
  *   - "start <node>" written to log and acked before executing request
  *   - "end <node>" written to log _with result of request_ logged and acked
  *   - write "end saga" message
- * - failure @ ~27m: this is clear failure of a request that triggers a
+ * - failure @ ~27m: this is clear failure of a request, which triggers a
  *   rollback.  write "abort <node>" message, etc.
  *   - when rolling back node: check log for entries for a node.  If none,
  *     do nothing and move on.  If there's an abort message, do nothing and move
@@ -310,12 +311,25 @@
  *   though that still wouldn't be statically type-checked.
  * - probably want to allow workflow execution to consume parameters
  *
- * But next steps: incorporate a more real notion of persistence
+ * Next steps here:
+ *
+ * - Take another look at WfLog and recover_workflow_log().  There's something
+ *   fishy here.  wflog.status() is supposed to be a per-node thing, yet we only
+ *   keep one per WfLog.  Relatedly, recover_workflow_log() only returns one of
+ *   them.
+ * - Use the new WfLog interface in WfExecutor::poll() to record "persistent"
+ *   state.
+ * - Add WfExecutor::recover(), which is somehow given a list of WfEvents and
+ *   uses recover_workflow_log() to compute the load state of each node, then
+ *   uses this to restore the in-memory execution state.
+ * - Add a few demos to convince myself this all works reasonably correctly.
  */
 
 #![feature(type_name_of_val)]
 #![feature(option_expect_none)]
 #![deny(elided_lifetimes_in_paths)]
+
+mod wf_log;
 
 use anyhow::anyhow;
 use core::any::Any;
@@ -334,12 +348,19 @@ use petgraph::Incoming;
 use petgraph::Outgoing;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 #[macro_use]
 extern crate async_trait;
 
+pub use wf_log::WfLog;
+pub use wf_log::recover_workflow_log;
+
 /* Widely-used types (within workflows) */
 
+/** Unique identifier for a Workflow */
+// XXX Should this have "w-" prefix like other clouds use?
+pub type WfId = Uuid;
 /** Error produced by a workflow action or a workflow itself */
 pub type WfError = anyhow::Error;
 /** Output produced on success by a workflow action or the workflow itself */
