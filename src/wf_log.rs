@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub type WfNodeId = u64;
+pub type WfLogResult = Result<(), WfError>;
 
 /**
  * Event types that may be found in the log for a particular action
@@ -145,7 +146,7 @@ impl WfLog {
         &mut self,
         node_id: WfNodeId,
         event_type: WfNodeEventType,
-    ) -> Result<(), WfError> {
+    ) -> WfLogResult {
         let event = WfNodeEvent {
             workflow_id: self.workflow_id,
             node_id,

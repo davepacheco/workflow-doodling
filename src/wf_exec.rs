@@ -1,10 +1,13 @@
 //! Manages execution of a workflow
 
+use crate::wf_log::WfNodeEventType;
 use crate::WfAction;
+use crate::WfCancelResult;
 use crate::WfContext;
 use crate::WfError;
 use crate::WfId;
 use crate::WfLog;
+use crate::WfLogResult;
 use crate::WfOutput;
 use crate::WfResult;
 use crate::Workflow;
@@ -20,8 +23,56 @@ use petgraph::Graph;
 use petgraph::Incoming;
 use petgraph::Outgoing;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/**
+ * Execution state for a workflow node
+ * TODO ASCII version of the pencil-and-paper diagram?
+ */
+enum WfNodeState {
+    Blocked,
+    Ready,
+    Starting(BoxFuture<'static, WfLogResult>),
+    Running(BoxFuture<'static, WfResult>),
+    Finishing(BoxFuture<'static, WfLogResult>, WfOutput),
+    Done(WfOutput),
+    Failing(BoxFuture<'static, WfLogResult>),
+    Failed,
+    StartingCancel(BoxFuture<'static, WfLogResult>),
+    Cancelling(BoxFuture<'static, WfCancelResult>),
+    FinishingCancel(BoxFuture<'static, WfLogResult>),
+    Cancelled,
+}
+
+/**
+ * Execution state for the workflow overall
+ */
+enum WfState {
+    Running,
+    Unwinding,
+    Done,
+}
+
+impl fmt::Display for WfNodeState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            WfNodeState::Blocked => "blocked",
+            WfNodeState::Ready => "ready",
+            WfNodeState::Starting(_) => "starting",
+            WfNodeState::Running(_) => "running",
+            WfNodeState::Finishing(..) => "finishing",
+            WfNodeState::Done(_) => "done",
+            WfNodeState::Failing(_) => "failing",
+            WfNodeState::Failed => "failed",
+            WfNodeState::StartingCancel(_) => "starting_cancel",
+            WfNodeState::Cancelling(_) => "cancelling",
+            WfNodeState::FinishingCancel(_) => "finishing_cancel",
+            WfNodeState::Cancelled => "cancelled",
+        })
+    }
+}
 
 /**
  * Executes a workflow
@@ -51,12 +102,15 @@ pub struct WfExecutor {
     /** Persistent state */
     wflog: WfLog,
 
-    /** Futures associated with currently-running nodes */
-    running: BTreeMap<NodeIndex, BoxFuture<'static, WfResult>>,
-    /** Outputs stored for nodes that have finished already */
-    finished: BTreeMap<NodeIndex, WfOutput>,
+    /** Overall execution state */
+    exec_state: WfState,
+    /** Execution state for each node in the graph */
+    node_states: BTreeMap<NodeIndex, WfNodeState>,
+    /** Nodes with outstanding futures. */
+    futures: Vec<NodeIndex>,
     /** Nodes that have not started but whose dependencies are satisfied */
     ready: Vec<NodeIndex>,
+
     /** Last node that completed. */
     /*
      * TODO This is really janky.  It's here just to have a way to get the
@@ -77,6 +131,9 @@ impl WfExecutor {
         // TODO "myself" here should be a hostname or other identifier for this
         // instance.
         let wflog = WfLog::new("myself", workflow_id);
+        let mut node_states = BTreeMap::new();
+
+        node_states.insert(w.root, WfNodeState::Ready);
 
         WfExecutor {
             graph: w.graph,
@@ -85,10 +142,11 @@ impl WfExecutor {
             root: w.root,
             workflow_id,
             wflog,
-            last_finished: w.root,
-            running: BTreeMap::new(),
-            finished: BTreeMap::new(),
+            exec_state: WfState::Running,
+            node_states,
+            futures: Vec::new(),
             ready: vec![w.root],
+            last_finished: w.root,
             error: None,
         }
     }
@@ -123,12 +181,40 @@ impl WfExecutor {
         }
 
         let name = self.node_names[&node].to_string();
-        let output = self
-            .finished
-            .get(&node)
-            .expect("cannot make ancestor tree on unfinished node");
-        tree.insert(name, Arc::clone(output));
-        self.make_ancestor_tree(tree, node);
+        let node_state =
+            self.node_states.get(&node).unwrap_or(&WfNodeState::Blocked);
+        if let WfNodeState::Done(output) = node_state {
+            tree.insert(name, Arc::clone(output));
+            self.make_ancestor_tree(tree, node);
+        } else {
+            /*
+             * If we're in this function, it's because we're looking at the
+             * ancestor of a node that's currently "Running".  All such
+             * ancestors must be "Done".  If they had never reached "Done", then
+             * we should never have started working on the current node.  If
+             * they were "Done" but moved on to "StartingCancel" or later, then
+             * that implies we've already finished cancelling descendants, which
+             * would include the current node.
+             */
+            panic!(
+                "cannot make ancestor tree on node in state \"{}\"",
+                node_state
+            );
+        }
+    }
+
+    /**
+     * Wrapper for WfLog.record_now() that maps internal node indexes to stable
+     * node ids.
+     */
+    // TODO Consider how we do map internal node indexes to stable node ids.
+    fn record_now(
+        &mut self,
+        node: NodeIndex,
+        event_type: WfNodeEventType,
+    ) -> BoxFuture<'_, WfLogResult> {
+        let node_id = node.index() as u64;
+        self.wflog.record_now(node_id, event_type).boxed()
     }
 }
 
@@ -139,10 +225,6 @@ impl Future for WfExecutor {
         mut self: Pin<&'a mut WfExecutor>,
         cx: &'a mut Context<'_>,
     ) -> Poll<WfResult> {
-        let mut recheck = false;
-
-        assert!(self.finished.len() <= self.graph.node_count());
-
         if let Some(_) = &self.error {
             // TODO We'd like to emit the error that we saved here but we still
             // hold a reference to it.  Maybe use take()?  But that leaves the
@@ -151,127 +233,213 @@ impl Future for WfExecutor {
             return Poll::Ready(Err(anyhow!("workflow failed")));
         }
 
-        if self.finished.len() == self.graph.node_count() {
+        if let WfState::Done = self.exec_state {
             // TODO Besides being janky, this will probably blow up for the case
             // of an empty workflow.
-            return Poll::Ready(Ok(Arc::clone(
-                &self.finished[&self.last_finished],
-            )));
+            let node = &self.last_finished;
+            let node_state = &self.node_states[node];
+            if let WfNodeState::Done(output) = node_state {
+                return Poll::Ready(Ok(Arc::clone(output)));
+            } else {
+                panic!("workflow done, but last node is not \"done\"");
+            }
         }
 
         /*
-         * If there's nothing running and nothing ready to run and we're still
-         * not finished and haven't encountered an error, something has gone
-         * seriously wrong.
-         */
-        if self.running.is_empty() && self.ready.is_empty() {
-            panic!("workflow came to rest without having finished");
-        }
-
-        /*
-         * If any of the tasks we currently think are running have now finished,
-         * walk their dependents and potentially mark them ready to run.
+         * Poll all of the futures.
          * TODO Is polling on _everything_ again really the right way to do
          * this?  I'm basically following what futures::join! does.
+         * TODO This dance with self.futures to pacify the borrow checker feels
+         * dubious.
          */
-        let newly_finished = {
-            let mut newly_finished = Vec::new();
+        let futures_to_check = self.futures.clone();
+        self.futures = Vec::new();
 
-            for (node, fut) in &mut self.running {
-                if let Poll::Ready(result) = fut.poll_unpin(cx) {
-                    recheck = true;
-                    newly_finished.push((*node, result));
-                }
-            }
-
-            newly_finished
-        };
-
-        for (node, result) in newly_finished {
-            self.running.remove(&node);
-
-            if let Err(error) = result {
-                /*
-                 * We currently assume errors are fatal.  That's not
-                 * necessarily right.
-                 * TODO how do we end right now?
-                 * TODO we'll need to clean up too!
-                 * TODO want to record which node generated this error.
-                 */
-                self.error = Some(error)
-            } else {
-                let output = result.unwrap();
-                self.finished
-                    .insert(node, output)
-                    .expect_none("node finished twice");
-                let mut newly_ready = Vec::new();
-
-                for depnode in self.graph.neighbors_directed(node, Outgoing) {
-                    /*
-                     * Check whether all of this node's incoming edges are
-                     * now satisfied.
-                     */
-                    let mut okay = true;
-                    for upstream in
-                        self.graph.neighbors_directed(depnode, Incoming)
-                    {
-                        if !self.finished.contains_key(&upstream) {
-                            okay = false;
-                            break;
+        for node in futures_to_check {
+            let mut node_state = self
+                .node_states
+                .remove(&node)
+                .expect("missing node state for node having future");
+            match node_state {
+                WfNodeState::Starting(ref mut log_future) => {
+                    if let Poll::Ready(result) = log_future.poll_unpin(cx) {
+                        if let Err(error) = result {
+                            todo!();
+                        } else {
+                            let wfaction = self
+                                .launchers
+                                .remove(&node)
+                                .expect("missing action for node");
+                            // TODO we could be much more efficient without
+                            // copying this tree each time.
+                            let mut ancestor_tree = BTreeMap::new();
+                            self.make_ancestor_tree(&mut ancestor_tree, node);
+                            let fut = wfaction.do_it(WfContext {
+                                ancestor_tree,
+                            });
+                            let boxed = fut.boxed();
+                            self.node_states
+                                .insert(node, WfNodeState::Running(boxed));
                         }
-                    }
-
-                    if okay {
-                        newly_ready.push(depnode);
+                    } else {
+                        self.node_states.insert(node, node_state);
                     }
                 }
 
-                // TODO It'd be nice to do this inline above, but we cannot
-                // borrow self.graph in order to iterate over
-                // neighbors_directed() while also borrowing self.ready mutably.
-                for depnode in newly_ready {
-                    self.ready.push(depnode);
+                WfNodeState::Running(ref mut action_future) => {
+                    if let Poll::Ready(result) = action_future.poll_unpin(cx) {
+                        match result {
+                            Err(error) => {
+                                let event_type = WfNodeEventType::Failed;
+                                let log_future =
+                                    self.record_now(node, event_type);
+                                self.node_states.insert(
+                                    node,
+                                    WfNodeState::Failing(log_future),
+                                );
+                            }
+                            Ok(output) => {
+                                let event_type = WfNodeEventType::Succeeded(
+                                    Arc::clone(&output),
+                                );
+                                let log_future =
+                                    self.record_now(node, event_type);
+                                self.node_states.insert(
+                                    node,
+                                    WfNodeState::Finishing(log_future, output),
+                                );
+                            }
+                        }
+                    } else {
+                        self.node_states.insert(node, node_state);
+                    }
                 }
 
-                self.last_finished = node;
+                _ => todo!(),
             }
         }
 
-        if self.error.is_none() {
-            let to_schedule = self.ready.drain(..).collect::<Vec<NodeIndex>>();
-            for node in to_schedule {
-                let wfaction = self
-                    .launchers
-                    .remove(&node)
-                    .expect("missing action for node");
-                // TODO we could be much more efficient without copying this
-                // tree each time.
-                let mut ancestor_tree = BTreeMap::new();
-                self.make_ancestor_tree(&mut ancestor_tree, node);
+        // XXX look at commented out stuff
 
-                let fut = wfaction.do_it(WfContext {
-                    ancestor_tree,
-                });
-                let boxed = fut.boxed();
-                self.running.insert(node, boxed);
-                recheck = true;
-            }
-        }
+        // XXX propagate forward the stuff that doesn't depend on a Future
+        // (that's mostly: newly-met dependencies and kicking off ready-to-run
+        // nodes)
 
-        /*
-         * If we completed any outstanding work, we need to re-check the end
-         * conditions.  If we dispatched any new work, we need to poll on those
-         * futures.  We could do either of those right here, but we'd have to
-         * duplicate code above.  It's easier to just invoke ourselves again
-         * with a tail call.  Of course, we don't want to do this if nothing
-         * changed, or we'll recurse indefinitely!
-         * TODO This isn't ideal, since we'll wind up polling again on anything
-         * that was already running.
-         */
-        if recheck {
-            self.poll(cx)
-        } else {
-            Poll::Pending
-        }
+        Poll::Pending
+
+        //        let mut recheck = false;
+        //
+        //        /*
+        //         * If there's nothing running and nothing ready to run and we're still
+        //         * not finished and haven't encountered an error, something has gone
+        //         * seriously wrong.
+        //         */
+        //        if self.running.is_empty() && self.ready.is_empty() {
+        //            panic!("workflow came to rest without having finished");
+        //        }
+        //
+        //        /*
+        //         * If any of the tasks we currently think are running have now finished,
+        //         * walk their dependents and potentially mark them ready to run.
+        //         */
+        //        let newly_finished {
+        //            let mut newly_finished = Vec::new();
+        //
+        //            for (node, fut) in &mut self.running {
+        //                if let Poll::Ready(result) = fut.poll_unpin(cx) {
+        //                    recheck = true;
+        //                    newly_finished.push((*node, result));
+        //                }
+        //            }
+        //
+        //            newly_finished
+        //        };
+        //
+        //        for (node, result) in newly_finished {
+        //            self.running.remove(&node);
+        //
+        //            if let Err(error) = result {
+        //                /*
+        //                 * We currently assume errors are fatal.  That's not
+        //                 * necessarily right.
+        //                 * TODO how do we end right now?
+        //                 * TODO we'll need to clean up too!
+        //                 * TODO want to record which node generated this error.
+        //                 */
+        //                self.error = Some(error)
+        //            } else {
+        //                let output = result.unwrap();
+        //                self.finished
+        //                    .insert(node, output)
+        //                    .expect_none("node finished twice");
+        //                let mut newly_ready = Vec::new();
+        //
+        //                for depnode in self.graph.neighbors_directed(node, Outgoing) {
+        //                    /*
+        //                     * Check whether all of this node's incoming edges are
+        //                     * now satisfied.
+        //                     */
+        //                    let mut okay = true;
+        //                    for upstream in
+        //                        self.graph.neighbors_directed(depnode, Incoming)
+        //                    {
+        //                        if !self.finished.contains_key(&upstream) {
+        //                            okay = false;
+        //                            break;
+        //                        }
+        //                    }
+        //
+        //                    if okay {
+        //                        newly_ready.push(depnode);
+        //                    }
+        //                }
+        //
+        //                // TODO It'd be nice to do this inline above, but we cannot
+        //                // borrow self.graph in order to iterate over
+        //                // neighbors_directed() while also borrowing self.ready mutably.
+        //                for depnode in newly_ready {
+        //                    self.ready.push(depnode);
+        //                }
+        //
+        //                self.last_finished = node;
+        //            }
+        //        }
+        //
+        //        if self.error.is_none() {
+        //            let to_schedule = self.ready.drain(..).collect::<Vec<NodeIndex>>();
+        //            for node in to_schedule {
+        //                let wfaction = self
+        //                    .launchers
+        //                    .remove(&node)
+        //                    .expect("missing action for node");
+        //                // TODO we could be much more efficient without copying this
+        //                // tree each time.
+        //                let mut ancestor_tree = BTreeMap::new();
+        //                self.make_ancestor_tree(&mut ancestor_tree, node);
+        //
+        //                let fut = wfaction.do_it(WfContext {
+        //                    ancestor_tree,
+        //                });
+        //                let boxed = fut.boxed();
+        //                self.running.insert(node, boxed);
+        //                recheck = true;
+        //            }
+        //        }
+        //
+        //        /*
+        //         * If we completed any outstanding work, we need to re-check the end
+        //         * conditions.  If we dispatched any new work, we need to poll on those
+        //         * futures.  We could do either of those right here, but we'd have to
+        //         * duplicate code above.  It's easier to just invoke ourselves again
+        //         * with a tail call.  Of course, we don't want to do this if nothing
+        //         * changed, or we'll recurse indefinitely!
+        //         * TODO This isn't ideal, since we'll wind up polling again on anything
+        //         * that was already running.
+        //         */
+        //        if recheck {
+        //            self.poll(cx)
+        //        } else {
+        //            Poll::Pending
+        //        }
     }
 }

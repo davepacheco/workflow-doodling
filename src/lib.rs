@@ -346,17 +346,21 @@ pub use wf_exec::WfExecutor;
 // TODO Probably don't need to be public, actually
 pub use wf_log::recover_workflow_log;
 pub use wf_log::WfLog;
+pub use wf_log::WfLogResult;
 
 /* Widely-used types (within workflows) */
 
 /** Unique identifier for a Workflow */
-// XXX Should this have "w-" prefix like other clouds use?
+// TODO Should this have "w-" prefix like other clouds use?
 pub type WfId = Uuid;
 /** Error produced by a workflow action or a workflow itself */
 pub type WfError = anyhow::Error;
 /** Output produced on success by a workflow action or the workflow itself */
 pub type WfOutput = Arc<dyn Any + Send + Sync + 'static>;
+/** Result of a workflow action or the workflow itself */
 pub type WfResult = Result<WfOutput, WfError>;
+/** Result of a workflow cancel action. */
+pub type WfCancelResult = Result<(), WfError>;
 
 /**
  * Building blocks of workflows
