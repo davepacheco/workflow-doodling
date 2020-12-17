@@ -108,11 +108,15 @@ pub struct WfNodeEvent {
     workflow_id: WfId,
     /** id of the workflow node */
     node_id: WfNodeId,
-    /** when this event was recorded (for debugging) */
-    event_time: DateTime<Utc>,
     /** what's indicated by this event */
     event_type: WfNodeEventType,
+
+    /* The following debugging fields are not used in the code. */
+    /** when this event was recorded (for debugging) */
+    #[allow(dead_code)]
+    event_time: DateTime<Utc>,
     /** creator of this event (e.g., a hostname, for debugging) */
+    #[allow(dead_code)]
     creator: String,
 }
 
@@ -230,6 +234,11 @@ pub fn recover_workflow_log(
      * Replay the events for this workflow.
      */
     for event in events {
+        /*
+         * The caller is responsible for ensuring that all of our events are for
+         * the correct workflow.
+         */
+        assert_eq!(wflog.workflow_id, event.workflow_id);
         wflog.record(event).with_context(|| "recovering workflow log")?;
     }
 

@@ -325,8 +325,8 @@
 #![feature(option_expect_none)]
 #![deny(elided_lifetimes_in_paths)]
 
-mod wf_log;
 mod wf_exec;
+mod wf_log;
 
 use core::any::Any;
 use core::fmt;
