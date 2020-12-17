@@ -63,11 +63,11 @@
  *   carry that out?  And how do we determine whether errors within subworkflows
  *   demand that the parent workflow also be reversed?
  * - bells and whistles:
+ *   - summary of current state a la Manta resharder
+ *   - pausing
  *   - concurrency limit
  *   - canarying
  *   - blast radius?
- *   - pausing
- *   - summary of current state a la Manta resharder
  *   - policy around what to do on failure (stop, rewind)
  * - revisit static typing in the construction and execution of the graph?
  *   - It's not even super clear what this will look like until we implement
@@ -313,12 +313,11 @@
  *
  * Next steps here:
  *
- * - Use the new WfLog interface in WfExecutor::poll() to record "persistent"
- *   state.
  * - Add WfExecutor::recover(), which is somehow given a list of WfEvents and
  *   uses recover_workflow_log() to compute the load state of each node, then
  *   uses this to restore the in-memory execution state.
  * - Add a few demos to convince myself this all works reasonably correctly.
+ * - Implement unwinding
  */
 
 #![feature(type_name_of_val)]

@@ -2,7 +2,6 @@
 
 use crate::wf_log::WfNodeEventType;
 use crate::WfAction;
-use crate::WfCancelResult;
 use crate::WfContext;
 use crate::WfError;
 use crate::WfId;
@@ -33,8 +32,20 @@ use uuid::Uuid;
 /**
  * Execution state for a workflow node
  * TODO ASCII version of the pencil-and-paper diagram?
+ * TODO There are several substates not currently used because we have no way to
+ * store them in the place they would go.  For example, we want to use
+ * "Starting" when we spawn the tokio task to process an action.  And we want to
+ * transition to "Running" when we've successfully recorded this action and
+ * kicked it off.  However, the state is only stored in the WfExecutor, and we
+ * can't mutate that (or even reference it) from the spawned task.  We could
+ * send a message over the channel, but then the state update is async and may
+ * not reflect reality.  We could use a Mutex, but it feels heavyweight.  Still,
+ * that may be the way to go.
+ * TODO Several other states are currently unused because we haven't implemented
+ * unwinding yet.
  */
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[allow(dead_code)]
 enum WfNodeState {
     Blocked,
     Ready,
@@ -56,6 +67,7 @@ enum WfNodeState {
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum WfState {
     Running,
+    #[allow(dead_code)] // TODO Not yet implemented
     Unwinding,
     Done,
 }
@@ -309,7 +321,7 @@ impl Future for WfExecutor {
             } else {
                 self.error = Some(message.result.unwrap_err());
                 todo!(); // TODO trigger unwind!
-                WfNodeState::Failed
+                // WfNodeState::Failed
             };
 
             self.node_states.insert(node, new_state);
