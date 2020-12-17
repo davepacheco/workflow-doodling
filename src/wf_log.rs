@@ -142,11 +142,11 @@ impl WfLog {
         }
     }
 
-    pub async fn record_now(
+    pub fn record_now(
         &mut self,
         node_id: WfNodeId,
         event_type: WfNodeEventType,
-    ) -> WfLogResult {
+    ) -> impl core::future::Future<Output = WfLogResult> {
         let event = WfNodeEvent {
             workflow_id: self.workflow_id,
             node_id,
@@ -155,7 +155,15 @@ impl WfLog {
             creator: self.creator.clone(),
         };
 
-        Ok(self.record(event).expect("illegal event"))
+        let result = self.record(event).expect("illegal event");
+
+        /*
+         * Although this implementation is synchronous, we want callers to
+         * behave as though it were async.
+         */
+        async move {
+            Ok(result)
+        }
     }
 
     fn record(&mut self, event: WfNodeEvent) -> Result<(), WfError> {

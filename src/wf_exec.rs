@@ -212,7 +212,7 @@ impl WfExecutor {
         &mut self,
         node: NodeIndex,
         event_type: WfNodeEventType,
-    ) -> BoxFuture<'_, WfLogResult> {
+    ) -> BoxFuture<'static, WfLogResult> {
         let node_id = node.index() as u64;
         self.wflog.record_now(node_id, event_type).boxed()
     }
