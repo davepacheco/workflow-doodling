@@ -354,7 +354,7 @@ pub type WfError = anyhow::Error;
 /** Output produced on success by a workflow action or the workflow itself */
 pub type WfOutput = Arc<dyn Any + Send + Sync + 'static>;
 /** Result of a workflow action or the workflow itself */
-pub type WfResult = Result<WfOutput, WfError>;
+pub type WfResult = Arc<Result<WfOutput, WfError>>;
 /** Result of a workflow cancel action. */
 pub type WfCancelResult = Result<(), WfError>;
 

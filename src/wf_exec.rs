@@ -29,6 +29,7 @@ use petgraph::Outgoing;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -102,8 +103,8 @@ struct TaskCompletion {
 /**
  * Executes a workflow
  *
- * `WfExecutor` implements `Future`.  To execute a workflow, use
- * [`WfExecutor::new`] and then `await` the resulting Future.
+ * Call `WfExecutor.wait_for_finish()` to get a Future.  You must `await` this
+ * Future to actually execute the workflow.
  */
 /*
  * TODO Lots more could be said here, but the basic idea matches distributed
@@ -138,6 +139,7 @@ pub struct WfExecutor {
     /** Outputs saved by completed actions. */
     node_outputs: BTreeMap<NodeIndex, WfOutput>,
 
+    /** Channel for receiving completion messages from nodes. */
     tx: mpsc::Sender<TaskCompletion>,
     /** Channel for receiving completion messages from nodes. */
     rx: mpsc::Receiver<TaskCompletion>,
@@ -153,6 +155,14 @@ pub struct WfExecutor {
     /** First error produced by a node, if any */
     /* TODO probably better as a state enum.  See poll(). */
     error: Option<WfError>,
+
+    /** Channel for monitoring execution completion */
+    finish_tx: broadcast::Sender<WfResult>,
+
+    /** Channel for monitoring state changes */
+    state_change_tx: broadcast::Sender<()>,
+    /** Channel for monitoring state changes */
+    state_change_rx: broadcast::Receiver<()>,
 }
 
 impl WfExecutor {
@@ -171,6 +181,8 @@ impl WfExecutor {
          * node count for this worst case.
          */
         let (tx, rx) = mpsc::channel(2 * w.graph.node_count());
+        let (finish_tx, _) = broadcast::channel(1);
+        let (state_change_tx, state_change_rx) = broadcast::channel(1);
 
         node_states.insert(w.root, WfNodeState::Ready);
 
@@ -190,6 +202,9 @@ impl WfExecutor {
             rx,
             last_finished: w.root,
             error: None,
+            finish_tx,
+            state_change_tx,
+            state_change_rx,
         }
     }
 
@@ -201,8 +216,6 @@ impl WfExecutor {
     // errors instead.
     pub fn new_recover(w: Workflow, wflog: WfLog) -> WfExecutor {
         let workflow_id = wflog.workflow_id;
-        /* See new(). */
-        let (tx, rx) = mpsc::channel(2 * w.graph.node_count());
         let mut node_states = BTreeMap::new();
         let topo_visitor = Topo::new(&w.graph);
         let mut done = false;
@@ -263,6 +276,11 @@ impl WfExecutor {
             WfState::Running
         };
 
+        /* See new(). */
+        let (tx, rx) = mpsc::channel(2 * w.graph.node_count());
+        let (finish_tx, _) = broadcast::channel(1);
+        let (state_change_tx, state_change_rx) = broadcast::channel(1);
+
         WfExecutor {
             graph: w.graph,
             launchers: w.launchers,
@@ -279,6 +297,9 @@ impl WfExecutor {
             rx,
             last_finished,
             error: None,
+            finish_tx,
+            state_change_tx,
+            state_change_rx,
         }
     }
 
@@ -358,6 +379,26 @@ impl WfExecutor {
         let wflog = self.wflog.lock().await;
         wflog.clone()
     }
+
+    /**
+     * Advances execution of the WfExecutor.
+     */
+    fn pump() {}
+
+    /**
+     * Returns a Future that waits for this executor to finish.
+     */
+    // TODO-cleanup Is this the idiomatic way to do this?  It seems like people
+    // generally return a specific struct that impl's Future, but that seems a
+    // lot harder to do here.
+    fn wait_for_finish(&self) -> impl Future<Output = WfResult> {
+        let mut rx = self.finish_tx.subscribe();
+        async move {
+            rx.recv().await.expect(
+                "unexpected receive error on workflow completion channel",
+            )
+        }
+    }
 }
 
 impl Future for WfExecutor {
@@ -372,10 +413,10 @@ impl Future for WfExecutor {
             // hold a reference to it.  Maybe use take()?  But that leaves the
             // internal state rather confused.  Maybe there should be a separate
             // boolean for whether an error has been recorded.
-            return Poll::Ready(Err(anyhow!(
+            return Poll::Ready(Err(Arc::new(anyhow!(
                 "workflow {} failed",
                 self.workflow_id
-            )));
+            ))));
         }
 
         if let WfState::Done = self.exec_state {
