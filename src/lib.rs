@@ -320,6 +320,7 @@
 mod wf_exec;
 mod wf_log;
 
+use async_trait::async_trait;
 use core::any::Any;
 use core::fmt;
 use core::fmt::Debug;
@@ -330,9 +331,6 @@ use petgraph::Graph;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
-
-#[macro_use]
-extern crate async_trait;
 
 pub use wf_exec::WfExecutor;
 // TODO Probably don't need to be public, actually
