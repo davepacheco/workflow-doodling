@@ -22,29 +22,22 @@
  *   graph.  It's not clear how to express this in Rust without a lot of
  *   boilerplate or macros.
  *
- *   We're deferring this for now.  _Right_ now, there's no built-in way to
- *   share any data at all.  The next step will be to add some generic state
- *   parameter provided to every function.
- *
- *   In terms of modifying this state, we'll need to consider whether we want to
- *   use Mutexes to protect them or provide a single execution thread/task with
- *   messages sent on a channel to update state.
- *
  * - How do execution parameters like canarying, limited concurrency, and
  *   limiting blast radius fit in?
  *
- * - Persistence: what state do we persist and how?  More on this below
+ * - Persistence: what state do we persist and how?  More on this below.
  *
  * The current status is that we have:
  *
  * - basic types: WfError, WfResult
- * - WfAction, which has a blanket impl for functions to minimize boilerplate
+ * - WfAction, a trait representing the actions taken for nodes in the graph
+ * - WfActionFunc, which makes it easy to create WfActions from functions
  * - WfBuilder, an interface for constructing a workflow graph pretty much by
  *   hand
- * - basic execution: build an executor that walks the graph and executes
- *   exactly the steps that it's allowed to execute with maximum parallelism
- * - shared data: flesh out the demo implementation by having the functions
- *   actually share data
+ * - basic execution via WfExecutor: an executor that walks the graph and
+ *   executes exactly the steps that it's allowed to execute with maximum
+ *   parallelism
+ * - shared data between actions
  * - composeability: inserting an entire workflow into a workflow node.  A big
  *   challenge here is that the state objects will differ.  Callers have to deal
  *   with this in the node that's part of the parent graph.  (That's kind of
