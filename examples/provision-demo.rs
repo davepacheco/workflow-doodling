@@ -108,9 +108,7 @@ async fn demo_prov_server_reserve(wfctx: WfContext) -> WfResult {
     let server_id = *wfctx.lookup::<u64>("server_id")?;
     assert_eq!(server_id, 1212);
     // XXX This is a janky way to provide output from the workflow itself
-    Ok(Arc::new(ServerAllocResult {
-        server_id,
-    }))
+    Ok(Arc::new(ServerAllocResult { server_id }))
 }
 
 async fn demo_prov_volume_create(wfctx: WfContext) -> WfResult {

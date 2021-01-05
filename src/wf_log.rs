@@ -165,9 +165,7 @@ impl WfLog {
          * Although this implementation is synchronous, we want callers to
          * behave as though it were async.
          */
-        async move {
-            Ok(result)
-        }
+        async move { Ok(result) }
     }
 
     fn record(&mut self, event: WfNodeEvent) -> Result<(), WfError> {

@@ -470,10 +470,7 @@ where
      * specific type.
      */
     pub fn new_action(f: FuncType) -> Box<dyn WfAction> {
-        Box::new(WfActionFunc {
-            func: f,
-            phantom: PhantomData,
-        })
+        Box::new(WfActionFunc { func: f, phantom: PhantomData })
     }
 }
 
@@ -568,13 +565,7 @@ impl WfBuilder {
         let root = graph.add_node(label);
         launchers.insert(root, first).expect_none("empty map had an element");
 
-        WfBuilder {
-            graph,
-            launchers,
-            root,
-            node_names,
-            last_added: vec![root],
-        }
+        WfBuilder { graph, launchers, root, node_names, last_added: vec![root] }
     }
 
     /**

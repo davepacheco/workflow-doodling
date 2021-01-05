@@ -321,7 +321,7 @@ impl Future for WfExecutor {
             } else {
                 self.error = Some(message.result.unwrap_err());
                 todo!(); // TODO trigger unwind!
-                // WfNodeState::Failed
+                         // WfNodeState::Failed
             };
 
             self.node_states.insert(node, new_state);
@@ -389,9 +389,7 @@ impl Future for WfExecutor {
                 let wflog1 = Arc::clone(&wflog);
                 WfExecutor::record_now(wflog1, node, WfNodeEventType::Started)
                     .await;
-                let exec_future = wfaction.do_it(WfContext {
-                    ancestor_tree,
-                });
+                let exec_future = wfaction.do_it(WfContext { ancestor_tree });
                 let result = exec_future.await;
                 let event_type = if let Ok(ref output) = result {
                     WfNodeEventType::Succeeded(Arc::clone(&output))
@@ -400,10 +398,7 @@ impl Future for WfExecutor {
                 };
                 WfExecutor::record_now(wflog, node, event_type).await;
                 node_done_tx
-                    .try_send(TaskCompletion {
-                        node_id: node,
-                        result,
-                    })
+                    .try_send(TaskCompletion { node_id: node, result })
                     .expect("unexpected channel failure");
             });
             self.node_tasks.insert(node, task);
