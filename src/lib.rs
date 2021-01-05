@@ -309,6 +309,12 @@
  * - Add WfExecutor::recover(), which is somehow given a list of WfEvents and
  *   uses recover_workflow_log() to compute the load state of each node, then
  *   uses this to restore the in-memory execution state.
+ *   - XXX working here: I've written some recovery code but it's a little hard
+ *     to test.  I think the next step is actually to break up the WfExecutor
+ *     from its Future.  I want to provide multiple possible Futures that will
+ *     wait for various conditions, like for the thing to become paused.  It
+ *     seems like a good way to do that might be to use channels, and each
+ *     Future just waits for a message on a channel.
  * - Add a few demos to convince myself this all works reasonably correctly.
  * - Implement unwinding
  */

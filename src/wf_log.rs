@@ -23,7 +23,7 @@ pub type WfLogResult = Result<(), WfError>;
  * TODO We might still want to put more information here, like the failure
  * error details and other debugging state.
  */
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum WfNodeEventType {
     /** The action has started running */
     Started,
@@ -103,6 +103,7 @@ impl WfNodeLoadStatus {
 /**
  * An entry in the workflow log
  */
+#[derive(Clone)]
 pub struct WfNodeEvent {
     /** id of the workflow */
     workflow_id: WfId,
@@ -128,9 +129,10 @@ pub struct WfNodeEvent {
 // that you're only doing one of these at a time by having these by separate
 // types, with the recovery one converting into WfLog when you're done with
 // recovery.
+#[derive(Clone)]
 pub struct WfLog {
     // TODO include version here
-    workflow_id: WfId,
+    pub workflow_id: WfId,
     creator: String,
     events: Vec<WfNodeEvent>,
     node_status: BTreeMap<WfNodeId, WfNodeLoadStatus>,

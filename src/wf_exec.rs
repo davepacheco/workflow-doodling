@@ -1,6 +1,7 @@
 //! Manages execution of a workflow
 
 use crate::wf_log::WfNodeEventType;
+use crate::wf_log::WfNodeLoadStatus;
 use crate::WfAction;
 use crate::WfContext;
 use crate::WfError;
@@ -20,6 +21,8 @@ use futures::lock::Mutex;
 use futures::FutureExt;
 use futures::StreamExt;
 use petgraph::graph::NodeIndex;
+use petgraph::visit::Topo;
+use petgraph::visit::Walker;
 use petgraph::Graph;
 use petgraph::Incoming;
 use petgraph::Outgoing;
@@ -191,6 +194,95 @@ impl WfExecutor {
     }
 
     /**
+     * Create an executor to run the given workflow that may have already
+     * started, using the given log events.
+     */
+    // TODO the panics and assertions in this function should be operational
+    // errors instead.
+    pub fn new_recover(w: Workflow, wflog: WfLog) -> WfExecutor {
+        let workflow_id = wflog.workflow_id;
+        /* See new(). */
+        let (tx, rx) = mpsc::channel(2 * w.graph.node_count());
+        let mut node_states = BTreeMap::new();
+        let topo_visitor = Topo::new(&w.graph);
+        let mut done = false;
+        let mut ready = Vec::new();
+        let mut node_outputs = BTreeMap::new();
+        let mut last_finished = w.root;
+        let mut nunfinished = 0;
+
+        for node in topo_visitor.iter(&w.graph) {
+            assert!(!node_states.contains_key(&node));
+            assert!(!node_outputs.contains_key(&node));
+
+            let node_status = wflog.load_status_for_node(node.index() as u64);
+            if let WfNodeLoadStatus::NeverStarted = node_status {
+                nunfinished += 1;
+                done = true;
+                continue;
+            }
+
+            if done {
+                panic!(
+                    "encountered node in invalid state topologically \
+                    after one that never started (state={:?})",
+                    node_status
+                );
+            }
+
+            match node_status {
+                WfNodeLoadStatus::NeverStarted => (), /* handled earlier */
+                WfNodeLoadStatus::Started => {
+                    // TODO-correctness should not log another "start" record
+                    // TODO-robustness check that parents have been satisfied
+                    /* XXX This would be a good place for a debug log. */
+                    nunfinished += 1;
+                    node_states.insert(node, WfNodeState::Ready);
+                    ready.push(node);
+                }
+                WfNodeLoadStatus::Succeeded(o) => {
+                    /* XXX This would be a good place for a debug log. */
+                    node_states.insert(node, WfNodeState::Done);
+                    node_outputs.insert(node, Arc::clone(o));
+                    last_finished = node;
+                }
+                _ => {
+                    // nunfinished += 1; // XXX re-insert when we remove todo!
+                    todo!("handle node state");
+                }
+            }
+        }
+
+        let wflog = Arc::new(Mutex::new(wflog));
+        let exec_state = if nunfinished == 0 {
+            assert_eq!(node_outputs.len(), w.graph.node_count());
+            assert_eq!(node_states.len(), w.graph.node_count());
+            assert!(ready.is_empty());
+            WfState::Done
+        } else {
+            WfState::Running
+        };
+
+        WfExecutor {
+            graph: w.graph,
+            launchers: w.launchers,
+            node_names: w.node_names,
+            root: w.root,
+            workflow_id,
+            wflog,
+            exec_state,
+            node_states,
+            node_tasks: BTreeMap::new(),
+            node_outputs,
+            ready,
+            tx,
+            rx,
+            last_finished,
+            error: None,
+        }
+    }
+
+    /**
      * Builds the "ancestor tree" for a node whose dependencies have all
      * completed.
      *
@@ -256,6 +348,15 @@ impl WfExecutor {
             wflog.record_now(node_id, event_type).await.unwrap()
         }
         .boxed()
+    }
+
+    /**
+     * Returns a copy of the current log for this workflow.  This is intended
+     * for testing recovery.
+     */
+    async fn snapshot(&self) -> WfLog {
+        let wflog = self.wflog.lock().await;
+        wflog.clone()
     }
 }
 
