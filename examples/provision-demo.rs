@@ -93,13 +93,13 @@ async fn demo_prov_server_alloc(wfctx: WfContext) -> WfFuncResult {
     // XXX This is an ugly pattern, and the way we've done things, various
     // callers are going to need to know about it.
     // XXX XXX working here XXX XXX
-    match &*wfctx.child_workflow(wf).await {
+    match wfctx.child_workflow(wf).await {
         Ok(result) => {
             let server_id =
                 result.downcast::<ServerAllocResult>().unwrap().server_id;
             Ok(Arc::new(server_id))
         }
-        Err(error) => Err(*error),
+        Err(error) => Err(error),
     }
 }
 
@@ -166,5 +166,5 @@ async fn main() {
     let w = make_provision_workflow();
     eprintln!("{:?}", w);
     let e = WfExecutor::new(w);
-    e.run().await.unwrap();
+    e.run().await;
 }

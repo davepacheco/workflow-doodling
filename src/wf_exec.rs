@@ -9,6 +9,7 @@ use crate::WfLog;
 use crate::WfOutput;
 use crate::WfResult;
 use crate::Workflow;
+use anyhow::anyhow;
 use core::future::Future;
 use futures::channel::mpsc;
 use futures::future::BoxFuture;
@@ -114,7 +115,7 @@ pub struct WfExecutor {
     root: NodeIndex,
 
     /** Channel for monitoring execution completion */
-    finish_tx: broadcast::Sender<WfResult>,
+    finish_tx: broadcast::Sender<()>,
 
     /** Unique identifier for this execution */
     // TODO The nomenclature is problematic here.  This is really a workflow
@@ -439,7 +440,7 @@ impl WfExecutor {
                     .remove(&node)
                     .expect("no task for completed node");
 
-                let new_state = if let Ok(ref output) = *message.result {
+                let new_state = if let Ok(ref output) = message.result {
                     live_state.node_outputs.insert(node, Arc::clone(&output));
                     WfNodeState::Done
                 } else {
@@ -448,7 +449,7 @@ impl WfExecutor {
                 };
 
                 live_state.node_states.insert(node, new_state);
-                live_state.result = Some(Arc::clone(&message.result));
+                live_state.result = Some(message.result);
 
                 (task, new_state)
             };
@@ -475,11 +476,7 @@ impl WfExecutor {
                 if self.graph.node_count() == live_state.node_outputs.len() {
                     live_state.exec_state = WfState::Done;
                     self.finish_tx
-                        .send(Arc::clone(
-                            &live_state.result.as_ref().expect(
-                                "workflow ofinished without any result",
-                            ),
-                        ))
+                        .send(())
                         .expect("failed to send finish message");
                     break;
                 }
@@ -551,7 +548,7 @@ impl WfExecutor {
                     .await;
                 let exec_future = wfaction.do_it(WfContext { ancestor_tree });
                 let result = exec_future.await;
-                let event_type = if let Ok(ref output) = *result {
+                let event_type = if let Ok(ref output) = result {
                     WfNodeEventType::Succeeded(Arc::clone(&output))
                 } else {
                     WfNodeEventType::Failed
@@ -565,12 +562,24 @@ impl WfExecutor {
         }
     }
 
-    pub fn run(&self) -> impl Future<Output = WfResult> + '_ {
+    pub fn run(&self) -> impl Future<Output = ()> + '_ {
         let mut rx = self.finish_tx.subscribe();
 
         async move {
             self.run_workflow().await;
             rx.recv().await.expect("failed to receive finish message")
+        }
+    }
+
+    // XXX janky
+    pub async fn consume_result(self) -> WfResult {
+        let live_state = self.live_state.lock().await;
+        let maybe_result = live_state.result.as_ref();
+        let result = maybe_result.unwrap();
+        match result {
+            Ok(output) => Ok(Arc::clone(output)),
+            // XXX Want to preserve the error, not this.
+            Err(_) => Err(anyhow!("workflow failed")),
         }
     }
 
@@ -586,7 +595,7 @@ impl WfExecutor {
     // possible if instead of making this a function you could call at any old
     // time, we made this a Future returned by a start() method that kicks off
     // execution.
-    pub fn wait_for_finish(&self) -> impl Future<Output = WfResult> + '_ {
+    pub fn wait_for_finish(&self) -> impl Future<Output = ()> + '_ {
         /*
          * It's important that we subscribe here, before we check self.state.
          * This way, if the workflow is currently running but is done by the
@@ -604,16 +613,9 @@ impl WfExecutor {
         async move {
             {
                 let live_state = self.live_state.lock().await;
-
                 if let WfState::Done = live_state.exec_state {
-                    assert!(live_state.result.is_some()); // XXX give WfState enum data instead?
-                    if let Some(ref result) = live_state.result {
-                        return Arc::clone(result);
-                    } else {
-                        panic!("workflow done with no result");
-                    }
+                    return;
                 }
-                assert!(live_state.result.is_none()); // XXX give WfState enum data instead?
             }
 
             rx.recv().await.expect(

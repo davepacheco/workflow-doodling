@@ -311,11 +311,10 @@
  *   uses this to restore the in-memory execution state.
  *   - XXX working here: I've written some recovery code but it's a little hard
  *     to test.  The next step was to break up the WfExecutor from its Future.
- *     I've written this code, and now it might be time to test it with the demo
- *     example.
- *     If that works, the next step might be to add pause_at() so that I can
- *     pause execution at some specific point and use snapshot() to get the log
- *     at that point, then test recovery frmo there.
+ *     I've written this code and tested it with the demo.
+ *     The next step might be to add pause_at() so that I can pause execution at
+ *     some specific point and use snapshot() to get the log at that point, then
+ *     test recovery frmo there.
  *     There's also a ton of cleanup to do here.
  * - Add a few demos to convince myself this all works reasonably correctly.
  * - Implement unwinding
@@ -356,7 +355,8 @@ pub type WfError = anyhow::Error;
 /** Output produced on success by a workflow action or the workflow itself */
 pub type WfOutput = Arc<dyn Any + Send + Sync + 'static>;
 /** Result of a workflow action or the workflow itself */
-pub type WfResult = Arc<Result<WfOutput, WfError>>;
+// pub type WfResult = Arc<Result<WfOutput, WfError>>;
+pub type WfResult = Result<WfOutput, WfError>;
 /** Result of a function implementing a workflow action */
 pub type WfFuncResult = Result<WfOutput, WfError>;
 /** Result of a workflow cancel action. */
@@ -448,7 +448,9 @@ impl WfContext {
          * this?
          */
         let e = WfExecutor::new(wf);
-        e.run().await
+        e.run().await;
+        // XXX
+        e.consume_result().await
     }
 }
 
@@ -490,7 +492,7 @@ where
 {
     async fn do_it(self: Box<Self>, wfctx: WfContext) -> WfResult {
         let fut = { (self.func)(wfctx) };
-        Arc::new(fut.await)
+        fut.await
     }
 }
 
@@ -512,7 +514,7 @@ struct WfActionUniversalFirst {}
 impl WfAction for WfActionUniversalFirst {
     async fn do_it(self: Box<Self>, _: WfContext) -> WfResult {
         eprintln!("universal first action");
-        Arc::new(Ok(Arc::new(())))
+        Ok(Arc::new(()))
     }
 }
 
