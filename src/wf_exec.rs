@@ -4,6 +4,7 @@ use crate::wf_log::WfNodeEventType;
 use crate::wf_log::WfNodeLoadStatus;
 use crate::WfAction;
 use crate::WfContext;
+use crate::WfError;
 use crate::WfId;
 use crate::WfLog;
 use crate::WfOutput;
@@ -89,16 +90,34 @@ impl fmt::Display for WfNodeState {
     }
 }
 
+/**
+ * Message sent from (tokio) task that executes an action to the executor
+ * indicating that the action has completed
+ */
 struct TaskCompletion {
     node_id: NodeIndex,
     result: WfResult,
 }
 
+/**
+ * Context provided to the (tokio) task that executes an action
+ */
 struct TaskParams {
+    /**
+     * Handle to the workflow's live state
+     *
+     * This is used only to update state for status purposes.  We want to avoid
+     * any tight coupling between this task and the internal state.
+     */
     live_state: Arc<Mutex<WfExecLiveState>>,
+
+    /** id of the graph node whose action we're running */
     node_id: NodeIndex,
+    /** channel over which to send completion message */
     done_tx: mpsc::Sender<TaskCompletion>,
+    /** Ancestor tree for this node.  See [`WfContext`]. */
     ancestor_tree: BTreeMap<String, WfOutput>,
+    /** The action itself that we're executing. */
     action: Box<dyn WfAction>,
 }
 
@@ -133,46 +152,6 @@ pub struct WfExecutor {
     live_state: Arc<Mutex<WfExecLiveState>>,
 }
 
-/**
- * Encapsulates the (mutable) execution state of a workflow
- */
-/*
- * This is linked to a `WfExecutor` and protected by a Mutex.  The state is
- * mainly modified by [`WfExecutor::run_workflow`].  We may add methods for
- * controlling the workflow (e.g., pausing), which would modify this as well.
- * We also intend to add methods for viewing workflow state, which will take the
- * lock to read state.
- *
- * If the view of a workflow were just (1) that it's running, and maybe (2) a
- * set of outstanding actions, then we might take a pretty different approach
- * here.  We might create a read-only view object that's populated periodically
- * by the workflow executor.  This still might be the way to go, but at the
- * moment we anticipate wanting pretty detailed debug information (like what
- * outputs were produced by what steps), so the view would essentially be a
- * whole copy of this object.
- */
-struct WfExecLiveState {
-    /** See [`Workflow::launchers`] */
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
-
-    /** Overall execution state */
-    exec_state: WfState,
-    /** Execution state for each node in the graph */
-    node_states: BTreeMap<NodeIndex, WfNodeState>,
-    /** Outstanding tasks for each node in the graph */
-    node_tasks: BTreeMap<NodeIndex, JoinHandle<()>>,
-    /** Nodes that have not started but whose dependencies are satisfied */
-    ready: Vec<NodeIndex>,
-    /** Outputs saved by completed actions. */
-    node_outputs: BTreeMap<NodeIndex, WfOutput>,
-
-    /** Final result of the workflow */
-    result: Option<WfResult>,
-
-    /** Persistent state */
-    wflog: WfLog,
-}
-
 impl WfExecutor {
     /** Create an executor to run the given workflow. */
     pub fn new(w: Workflow) -> WfExecutor {
@@ -180,9 +159,8 @@ impl WfExecutor {
         // TODO "myself" here should be a hostname or other identifier for this
         // instance.
         let wflog = WfLog::new("myself", workflow_id);
-        let mut node_states = BTreeMap::new();
         let (finish_tx, _) = broadcast::channel(1);
-
+        let mut node_states = BTreeMap::new();
         node_states.insert(w.root, WfNodeState::Ready);
 
         WfExecutor {
@@ -199,7 +177,6 @@ impl WfExecutor {
                 node_tasks: BTreeMap::new(),
                 node_outputs: BTreeMap::new(),
                 ready: vec![w.root],
-                result: None,
                 wflog,
             })),
         }
@@ -286,7 +263,6 @@ impl WfExecutor {
                 node_tasks: BTreeMap::new(),
                 node_outputs,
                 ready,
-                result: None,
                 wflog,
             })),
         }
@@ -294,7 +270,7 @@ impl WfExecutor {
 
     /**
      * Builds the "ancestor tree" for a node whose dependencies have all
-     * completed.
+     * completed
      *
      * The ancestor tree for a node is a map whose keys are strings that
      * identify ancestor nodes in the graph and whose values represent the
@@ -359,7 +335,10 @@ impl WfExecutor {
     }
 
     /**
-     * Advances execution of the WfExecutor.
+     * Runs the workflow
+     *
+     * This might be running a workflow that has never been started before or
+     * one that has been recovered from persistent state.
      */
     async fn run_workflow(&self) {
         // XXX how to check this?  do we want to take the lock?  Note that it's
@@ -384,57 +363,47 @@ impl WfExecutor {
 
         /*
          * Process any messages available on our channel.
-         *
-         * It shouldn't be possible to get None back here.  That would mean that
-         * all of the consumers have closed their ends, but we still have a
-         * consumer of our own in "tx".
          */
         loop {
+            /*
+             * It shouldn't be possible to get None back here.  That would mean
+             * that all of the consumers have closed their ends, but we still
+             * have a consumer of our own in "tx".
+             */
             let message = rx.next().await.expect("broken tx");
-            let node = message.node_id;
+            let node_id = message.node_id;
 
             let (task, new_state) = {
                 let mut live_state = self.live_state.lock().await;
-                let old_state = live_state
+                let old_state = *live_state
                     .node_states
-                    .remove(&node)
+                    .get(&node_id)
                     .expect("node finished that was not running");
-                assert_eq!(old_state, WfNodeState::Finishing);
-
-                /*
-                 * It would be nice to join on this task here, but we don't know for
-                 * sure it's completed yet.  (It should be imminently, but we can't
-                 * wait in this context.)
-                 */
                 let task = live_state
                     .node_tasks
-                    .remove(&node)
+                    .remove(&node_id)
                     .expect("no task for completed node");
 
-                let new_state = if let Ok(ref output) = message.result {
-                    live_state.node_outputs.insert(node, Arc::clone(&output));
-                    WfNodeState::Done
+                if old_state == WfNodeState::Done {
+                    let output = message.result.unwrap();
+                    live_state.node_outputs.insert(node_id, output);
                 } else {
-                    todo!(); // TODO trigger unwind!
-                             // WfNodeState::Failed
-                };
+                    assert_eq!(old_state, WfNodeState::Failed);
+                }
 
-                live_state.node_states.insert(node, new_state);
-                live_state.result = Some(message.result);
-
-                (task, new_state)
+                (task, old_state)
             };
 
             /*
              * This should really not take long, as there's nothing else this
              * task does after sending the message that we just received.  It's
              * good to wait here to make sure things are cleaned up.
-             * TODO-robustness can we enforce this?
+             * TODO-robustness can we enforce that this won't take long?
              */
             task.await.expect("node task failed unexpectedly");
 
             if new_state == WfNodeState::Failed {
-                continue;
+                todo!(); // TODO trigger unwind!
             }
 
             assert_eq!(new_state, WfNodeState::Done);
@@ -442,8 +411,8 @@ impl WfExecutor {
             {
                 let mut live_state = self.live_state.lock().await;
 
-                // TODO this condition needs work.  It doesn't account for failed nodes
-                // or unwinding or anything.
+                // TODO this condition needs work.  It doesn't account for
+                // failed nodes or unwinding or anything.
                 if self.graph.node_count() == live_state.node_outputs.len() {
                     live_state.exec_state = WfState::Done;
                     self.finish_tx
@@ -452,7 +421,8 @@ impl WfExecutor {
                     break;
                 }
 
-                for depnode in self.graph.neighbors_directed(node, Outgoing) {
+                for depnode in self.graph.neighbors_directed(node_id, Outgoing)
+                {
                     /*
                      * Check whether all of this node's incoming edges are now
                      * satisfied.
@@ -552,13 +522,15 @@ impl WfExecutor {
             .action
             .do_it(WfContext { ancestor_tree: task_params.ancestor_tree });
         let result = exec_future.await;
-        let (event_type, next_state) = if let Ok(ref output) = result {
+        let (event_type, next_state, next_next) = if let Ok(ref output) = result
+        {
             (
                 WfNodeEventType::Succeeded(Arc::clone(&output)),
                 WfNodeState::Finishing,
+                WfNodeState::Done,
             )
         } else {
-            (WfNodeEventType::Failed, WfNodeState::Failing)
+            (WfNodeEventType::Failed, WfNodeState::Failing, WfNodeState::Failed)
         };
 
         {
@@ -566,6 +538,7 @@ impl WfExecutor {
             live_state.node_states.insert(node_id, next_state);
             WfExecutor::record_now(&mut live_state.wflog, node_id, event_type)
                 .await;
+            live_state.node_states.insert(node_id, next_next);
         }
 
         task_params
@@ -583,15 +556,85 @@ impl WfExecutor {
         }
     }
 
-    // XXX janky
-    pub async fn consume_result(self) -> WfResult {
+    // TODO better than this would be if the result of executing the workflow is
+    // a WfSummary struct that provides access to information about each node
+    // (timing, output, error).  This struct would be immutable.  Then this
+    // wouldn't need to be async because we wouldn't need to take a lock.
+    pub async fn lookup_output<T: Send + Sync + 'static>(
+        &self,
+        name: &str,
+    ) -> Result<Arc<T>, WfError> {
         let live_state = self.live_state.lock().await;
-        let maybe_result = live_state.result.as_ref();
-        let result = maybe_result.unwrap();
-        match result {
-            Ok(output) => Ok(Arc::clone(output)),
-            // XXX Want to preserve the error, not this.
-            Err(_) => Err(anyhow!("workflow failed")),
+        /* XXX This is awful */
+        for node_id in live_state.node_outputs.keys() {
+            let node_name = self.node_names.get(node_id);
+            if node_name.is_none() {
+                assert_eq!(node_id.index() as u64, 0);
+                continue;
+            }
+
+            if node_name.unwrap() == name {
+                let item = live_state.node_outputs.get(&node_id).unwrap();
+                let specific_item = Arc::clone(item)
+                    .downcast::<T>()
+                    .expect(&format!("node {} produced unexpected type", name));
+                return Ok(specific_item);
+            }
         }
+
+        // XXX Should be a graceful error if the node is valid in the workflow
+        panic!(
+            "node {} not part of workflow or did not finish successfully",
+            name
+        );
     }
 }
+
+/**
+ * Encapsulates the (mutable) execution state of a workflow
+ */
+/*
+ * This is linked to a `WfExecutor` and protected by a Mutex.  The state is
+ * mainly modified by [`WfExecutor::run_workflow`].  We may add methods for
+ * controlling the workflow (e.g., pausing), which would modify this as well.
+ * We also intend to add methods for viewing workflow state, which will take the
+ * lock to read state.
+ *
+ * If the view of a workflow were just (1) that it's running, and maybe (2) a
+ * set of outstanding actions, then we might take a pretty different approach
+ * here.  We might create a read-only view object that's populated periodically
+ * by the workflow executor.  This still might be the way to go, but at the
+ * moment we anticipate wanting pretty detailed debug information (like what
+ * outputs were produced by what steps), so the view would essentially be a
+ * whole copy of this object.
+ */
+struct WfExecLiveState {
+    /** See [`Workflow::launchers`] */
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
+
+    /** Overall execution state */
+    exec_state: WfState,
+    /** Execution state for each node in the graph */
+    node_states: BTreeMap<NodeIndex, WfNodeState>,
+    /** Outstanding tasks for each node in the graph */
+    node_tasks: BTreeMap<NodeIndex, JoinHandle<()>>,
+    /** Nodes that have not started but whose dependencies are satisfied */
+    ready: Vec<NodeIndex>,
+    /** Outputs saved by completed actions. */
+    // XXX may as well store errors too
+    node_outputs: BTreeMap<NodeIndex, WfOutput>,
+
+    /** Persistent state */
+    wflog: WfLog,
+}
+
+// impl WfExecLiveState {
+//     // mark ready (set state = ready, append to ready queue)
+//     // set node state (only allowed for a handful of states)
+//     // set starting (sets state, consumes task handle)
+//     // set finishing (sets state, removes and returns task, records result)
+//     // propagate_ready
+//     pub fn new() -> WfExecLiveState {
+//
+//     }
+// }

@@ -438,7 +438,7 @@ impl WfContext {
      * detect that they're part of a workflow already somehow and make the new
      * one a child workflow?
      */
-    pub async fn child_workflow(&self, wf: Workflow) -> WfResult {
+    pub async fn child_workflow(&self, wf: Workflow) -> WfExecutor {
         /*
          * TODO Really we want this to reach into the parent WfExecutor and make
          * a record about this new execution.  This is mostly for observability
@@ -449,8 +449,7 @@ impl WfContext {
          */
         let e = WfExecutor::new(wf);
         e.run().await;
-        // XXX
-        e.consume_result().await
+        e
     }
 }
 

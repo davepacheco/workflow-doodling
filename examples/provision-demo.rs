@@ -90,17 +90,10 @@ async fn demo_prov_server_alloc(wfctx: WfContext) -> WfFuncResult {
     );
     let wf = w.build();
 
-    // XXX This is an ugly pattern, and the way we've done things, various
-    // callers are going to need to know about it.
-    // XXX XXX working here XXX XXX
-    match wfctx.child_workflow(wf).await {
-        Ok(result) => {
-            let server_id =
-                result.downcast::<ServerAllocResult>().unwrap().server_id;
-            Ok(Arc::new(server_id))
-        }
-        Err(error) => Err(error),
-    }
+    let e = wfctx.child_workflow(wf).await;
+    let server_allocated: Arc<ServerAllocResult> =
+        e.lookup_output("server_reserve").await?;
+    Ok(Arc::new(server_allocated.server_id))
 }
 
 struct ServerAllocResult {
@@ -112,6 +105,7 @@ async fn demo_prov_server_pick(_wfctx: WfContext) -> WfFuncResult {
     let server_id = 1212u64;
     Ok(Arc::new(server_id))
 }
+
 async fn demo_prov_server_reserve(wfctx: WfContext) -> WfFuncResult {
     eprintln!("    reserve server");
     let server_id = *wfctx.lookup::<u64>("server_id")?;
