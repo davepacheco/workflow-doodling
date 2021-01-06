@@ -130,8 +130,26 @@ pub struct WfExecutor {
     live_state: Mutex<WfExecLiveState>,
 }
 
+/**
+ * Encapsulates the (mutable) execution state of a workflow
+ */
+/*
+ * This is linked to a `WfExecutor` and protected by a Mutex.  The state is
+ * mainly modified by [`WfExecutor::run_workflow`].  We may add methods for
+ * controlling the workflow (e.g., pausing), which would modify this as well.
+ * We also intend to add methods for viewing workflow state, which will take the
+ * lock to read state.
+ *
+ * If the view of a workflow were just (1) that it's running, and maybe (2) a
+ * set of outstanding actions, then we might take a pretty different approach
+ * here.  We might create a read-only view object that's populated periodically
+ * by the workflow executor.  This still might be the way to go, but at the
+ * moment we anticipate wanting pretty detailed debug information (like what
+ * outputs were produced by what steps), so the view would essentially be a
+ * whole copy of this object.
+ */
 struct WfExecLiveState {
-    /* See `Workflow` */
+    /** See [`Workflow::launchers`] */
     launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
 
     /** Overall execution state */
@@ -351,58 +369,19 @@ impl WfExecutor {
     /**
      * Advances execution of the WfExecutor.
      */
-    // TODO design notes XXX working here XXX XXX
-    // - this should be an async function.  We want to go that model rather than
-    //   implementing poll() and calling poll() on subfutures.
-    // - thus: the structure must be that it's just a loop reading messages
-    //   off of its channel
-    // - we want to expose state and control to consumers:
-    //   - current status
-    //   - pause/unpause/abort
-    //   - snapshot log
-    //   How can we do that?  This function needs an exclusive reference to
-    //   "self" in order to do a lot of its work.  We must decompose the state:
-    //   - actual execution state: we need exclusive access for most of work.
-    //     We could drop that while we're blocked.
-    //     option: mutex to protect it
-    //     option: provide a separate view of the state for consumers and have
-    //     _that_ protected by a lock (or atomic).  Would need a similar
-    //     mechanism for control parameters.
-    // Proposal 1:
-    // - WfExecutor has a few kinds of state:
-    //   - immutable: the stuff from Workflow (e.g., "graph", "node_names",
-    //     "root")
-    //   - view-and-control state:
-    //     - protected by lock
-    //     - at least: result
-    //     - problem: depending on how detailed we want the status to be, this
-    //       could be a complete copy of the live execution state
-    //   - live execution state
-    //     - wflog, exec_state, node_states, node_tasks, ready, node_outputs,
-    //       launchers
-    // - run_workflow() has:
-    //   - shared reference to immutable parameters
-    //   - reference to the _lock_ used for view-and-control state, a lock that
-    //     it takes only briefly to check if it's been paused/aborted and to
-    //     update the view state
-    //   - exclusive access to the live execution state
-    //
-    // Proposal 2:
-    // - We don't distinguish so carefully between view-and-control and live
-    //   execution state, on the grounds that consumers might want an
-    //   arbitrarily deep view of the current state.
-    // - run_workflow() explicitly takes and drops the lock protecting live
-    //   execution state when it updates it.
     async fn run_workflow(&self) {
         // XXX how to check this?  do we want to take the lock?  Note that it's
         // not obvious it will be Running here -- consider the recovery case.
+        // TODO It would also be nice every time we block on the channel to
+        // assert that there are outstanding operations.
         // assert_eq!(self.exec_state, WfState::Running);
 
         /*
-         * In practice, each node can enqueue only two messages in its lifetime:
-         * one for completion of the action, and one for completion of the
-         * compensating action.  We bound this channel's size at twice the graph
-         * node count for this worst case.
+         * Allocate the channel used for node tasks to tell us when they've
+         * completed.  In practice, each node can enqueue only two messages in
+         * its lifetime: one for completion of the action, and one for
+         * completion of the compensating action.  We bound this channel's size
+         * at twice the graph node count for this worst case.
          */
         let (tx, mut rx) = mpsc::channel(2 * self.graph.node_count());
 
