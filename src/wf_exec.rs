@@ -96,6 +96,15 @@ struct TaskCompletion {
     result: WfResult,
 }
 
+struct TaskParams {
+    live_state: Arc<Mutex<WfExecLiveState>>,
+    wflog: Arc<Mutex<WfLog>>,
+    node_id: NodeIndex,
+    done_tx: mpsc::Sender<TaskCompletion>,
+    ancestor_tree: BTreeMap<String, WfOutput>,
+    action: Box<dyn WfAction>,
+}
+
 /**
  * Executes a workflow
  *
@@ -127,7 +136,7 @@ pub struct WfExecutor {
     // XXX put into live_state without Arc+Mutex?
     wflog: Arc<Mutex<WfLog>>,
 
-    live_state: Mutex<WfExecLiveState>,
+    live_state: Arc<Mutex<WfExecLiveState>>,
 }
 
 /**
@@ -187,7 +196,7 @@ impl WfExecutor {
             wflog,
             finish_tx,
 
-            live_state: Mutex::new(WfExecLiveState {
+            live_state: Arc::new(Mutex::new(WfExecLiveState {
                 launchers: w.launchers,
                 exec_state: WfState::Running,
                 node_states,
@@ -195,7 +204,7 @@ impl WfExecutor {
                 node_outputs: BTreeMap::new(),
                 ready: vec![w.root],
                 result: None,
-            }),
+            })),
         }
     }
 
@@ -275,7 +284,7 @@ impl WfExecutor {
             workflow_id,
             wflog,
             finish_tx,
-            live_state: Mutex::new(WfExecLiveState {
+            live_state: Arc::new(Mutex::new(WfExecLiveState {
                 launchers: w.launchers,
                 exec_state,
                 node_states,
@@ -283,7 +292,7 @@ impl WfExecutor {
                 node_outputs,
                 ready,
                 result: None,
-            }),
+            })),
         }
     }
 
@@ -339,6 +348,8 @@ impl WfExecutor {
     /**
      * Wrapper for WfLog.record_now() that maps internal node indexes to stable
      * node ids.
+     * XXX Now that WfExecLiveState is protected by a Mutex, maybe we don't need
+     * this to be async and take another lock?
      */
     // TODO Consider how we do map internal node indexes to stable node ids.
     // TODO clean up this interface
@@ -407,7 +418,7 @@ impl WfExecutor {
                     .node_states
                     .remove(&node)
                     .expect("node finished that was not running");
-                assert_eq!(old_state, WfNodeState::Running);
+                assert_eq!(old_state, WfNodeState::Finishing);
 
                 /*
                  * It would be nice to join on this task here, but we don't know for
@@ -506,38 +517,76 @@ impl WfExecutor {
         let ready_to_run = live_state.ready.clone();
         live_state.ready = Vec::new();
 
-        for node in ready_to_run {
-            assert_eq!(live_state.node_states[&node], WfNodeState::Ready);
+        for node_id in ready_to_run {
+            assert_eq!(live_state.node_states[&node_id], WfNodeState::Ready);
 
             let wfaction = live_state
                 .launchers
-                .remove(&node)
+                .remove(&node_id)
                 .expect("missing action for node");
             // TODO we could be much more efficient without copying this tree
             // each time.
             let mut ancestor_tree = BTreeMap::new();
-            self.make_ancestor_tree(&mut ancestor_tree, &live_state, node);
-            let mut node_done_tx = tx.clone();
-            // XXX should be Starting, but we have no way to change to Running
-            live_state.node_states.insert(node, WfNodeState::Running);
-            let wflog = Arc::clone(&self.wflog);
-            let task = tokio::spawn(async move {
-                let wflog1 = Arc::clone(&wflog);
-                WfExecutor::record_now(wflog1, node, WfNodeEventType::Started)
-                    .await;
-                let exec_future = wfaction.do_it(WfContext { ancestor_tree });
-                let result = exec_future.await;
-                let event_type = if let Ok(ref output) = result {
-                    WfNodeEventType::Succeeded(Arc::clone(&output))
-                } else {
-                    WfNodeEventType::Failed
-                };
-                WfExecutor::record_now(wflog, node, event_type).await;
-                node_done_tx
-                    .try_send(TaskCompletion { node_id: node, result })
-                    .expect("unexpected channel failure");
-            });
-            live_state.node_tasks.insert(node, task);
+            self.make_ancestor_tree(&mut ancestor_tree, &live_state, node_id);
+
+            let task_params = TaskParams {
+                live_state: Arc::clone(&self.live_state),
+                wflog: Arc::clone(&self.wflog),
+                node_id,
+                done_tx: tx.clone(),
+                ancestor_tree,
+                action: wfaction,
+            };
+
+            live_state.node_states.insert(node_id, WfNodeState::Starting);
+            let task = tokio::spawn(self.exec_node(task_params));
+            live_state.node_tasks.insert(node_id, task);
+        }
+    }
+
+    /**
+     * Body of a (tokio) task that executes an action.
+     */
+    fn exec_node(
+        &self,
+        mut task_params: TaskParams,
+    ) -> impl Future<Output = ()> {
+        async move {
+            let node_id = task_params.node_id;
+            let wflog1 = Arc::clone(&task_params.wflog);
+            WfExecutor::record_now(wflog1, node_id, WfNodeEventType::Started)
+                .await;
+
+            {
+                let mut live_state = task_params.live_state.lock().await;
+                live_state.node_states.insert(node_id, WfNodeState::Running);
+            }
+
+            let exec_future = task_params
+                .action
+                .do_it(WfContext { ancestor_tree: task_params.ancestor_tree });
+            let result = exec_future.await;
+            let (event_type, next_state) = if let Ok(ref output) = result {
+                (
+                    WfNodeEventType::Succeeded(Arc::clone(&output)),
+                    WfNodeState::Finishing,
+                )
+            } else {
+                (WfNodeEventType::Failed, WfNodeState::Failing)
+            };
+
+            {
+                let mut live_state = task_params.live_state.lock().await;
+                live_state.node_states.insert(node_id, next_state);
+            }
+
+            WfExecutor::record_now(task_params.wflog, node_id, event_type)
+                .await;
+
+            task_params
+                .done_tx
+                .try_send(TaskCompletion { node_id, result })
+                .expect("unexpected channel failure");
         }
     }
 
