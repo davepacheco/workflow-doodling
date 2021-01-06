@@ -99,8 +99,8 @@ struct TaskCompletion {
 /**
  * Executes a workflow
  *
- * Call `WfExecutor.wait_for_finish()` to get a Future.  You must `await` this
- * Future to actually execute the workflow.
+ * Call `WfExecutor.run()` to get a Future.  You must `await` this Future to
+ * actually execute the workflow.
  */
 /*
  * TODO Lots more could be said here, but the basic idea matches distributed
@@ -580,47 +580,6 @@ impl WfExecutor {
             Ok(output) => Ok(Arc::clone(output)),
             // XXX Want to preserve the error, not this.
             Err(_) => Err(anyhow!("workflow failed")),
-        }
-    }
-
-    /**
-     * Returns a Future that waits for this executor to finish.
-     */
-    // TODO-cleanup Is this the idiomatic way to do this?  It seems like people
-    // generally return a specific struct that impl's Future, but that seems a
-    // lot harder to do here.
-    // TODO It might be nice if the returned future didn't have an implicit
-    // reference (by lifetime?) to "self"?  This currently isn't possible
-    // because we need to take the lock to check the state.  This might be
-    // possible if instead of making this a function you could call at any old
-    // time, we made this a Future returned by a start() method that kicks off
-    // execution.
-    pub fn wait_for_finish(&self) -> impl Future<Output = ()> + '_ {
-        /*
-         * It's important that we subscribe here, before we check self.state.
-         * This way, if the workflow is currently running but is done by the
-         * time we try to recv() on this channel, we're guaranteed that there
-         * will be a message there for us.  If we subscribed after the check,
-         * there would be a window in which we see the workflow running, but it
-         * completes before we subscribe, and we'd miss a wakeup.
-         * TODO-cleanup Is the above true?  Or is it impossible for the state to
-         * change because we have a reference to `self`?  If the above is true,
-         * it's somewhat surprising that this is so easy to get wrong.  Is there
-         * something more deeply wrong with our approach?
-         */
-        let mut rx = self.finish_tx.subscribe();
-
-        async move {
-            {
-                let live_state = self.live_state.lock().await;
-                if let WfState::Done = live_state.exec_state {
-                    return;
-                }
-            }
-
-            rx.recv().await.expect(
-                "unexpected receive error on workflow completion channel",
-            )
         }
     }
 }
