@@ -310,11 +310,13 @@
  *   uses recover_workflow_log() to compute the load state of each node, then
  *   uses this to restore the in-memory execution state.
  *   - XXX working here: I've written some recovery code but it's a little hard
- *     to test.  I think the next step is actually to break up the WfExecutor
- *     from its Future.  I want to provide multiple possible Futures that will
- *     wait for various conditions, like for the thing to become paused.  It
- *     seems like a good way to do that might be to use channels, and each
- *     Future just waits for a message on a channel.
+ *     to test.  The next step was to break up the WfExecutor from its Future.
+ *     I've written this code, and now it might be time to test it with the demo
+ *     example.
+ *     If that works, the next step might be to add pause_at() so that I can
+ *     pause execution at some specific point and use snapshot() to get the log
+ *     at that point, then test recovery frmo there.
+ *     There's also a ton of cleanup to do here.
  * - Add a few demos to convince myself this all works reasonably correctly.
  * - Implement unwinding
  */
@@ -355,6 +357,8 @@ pub type WfError = anyhow::Error;
 pub type WfOutput = Arc<dyn Any + Send + Sync + 'static>;
 /** Result of a workflow action or the workflow itself */
 pub type WfResult = Arc<Result<WfOutput, WfError>>;
+/** Result of a function implementing a workflow action */
+pub type WfFuncResult = Result<WfOutput, WfError>;
 /** Result of a workflow cancel action. */
 pub type WfCancelResult = Result<(), WfError>;
 
@@ -444,7 +448,7 @@ impl WfContext {
          * this?
          */
         let e = WfExecutor::new(wf);
-        e.await
+        e.run().await
     }
 }
 
@@ -454,7 +458,7 @@ impl WfContext {
 pub struct WfActionFunc<FutType, FuncType>
 where
     FuncType: Fn(WfContext) -> FutType + Send + 'static,
-    FutType: Future<Output = WfResult> + Send + 'static,
+    FutType: Future<Output = WfFuncResult> + Send + 'static,
 {
     func: FuncType,
     phantom: PhantomData<FutType>,
@@ -463,7 +467,7 @@ where
 impl<FutType, FuncType> WfActionFunc<FutType, FuncType>
 where
     FuncType: Fn(WfContext) -> FutType + Send + 'static,
-    FutType: Future<Output = WfResult> + Send + 'static,
+    FutType: Future<Output = WfFuncResult> + Send + 'static,
 {
     /**
      * Wrap a function in a `WfActionFunc`
@@ -482,18 +486,18 @@ where
 impl<FutType, FuncType> WfAction for WfActionFunc<FutType, FuncType>
 where
     FuncType: Fn(WfContext) -> FutType + Send + 'static,
-    FutType: Future<Output = WfResult> + Send + 'static,
+    FutType: Future<Output = WfFuncResult> + Send + 'static,
 {
     async fn do_it(self: Box<Self>, wfctx: WfContext) -> WfResult {
         let fut = { (self.func)(wfctx) };
-        fut.await
+        Arc::new(fut.await)
     }
 }
 
 impl<FutType, FuncType> Debug for WfActionFunc<FutType, FuncType>
 where
     FuncType: Fn(WfContext) -> FutType + Send + 'static,
-    FutType: Future<Output = WfResult> + Send + 'static,
+    FutType: Future<Output = WfFuncResult> + Send + 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&std::any::type_name_of_val(&self.func))
@@ -508,7 +512,7 @@ struct WfActionUniversalFirst {}
 impl WfAction for WfActionUniversalFirst {
     async fn do_it(self: Box<Self>, _: WfContext) -> WfResult {
         eprintln!("universal first action");
-        Ok(Arc::new(()))
+        Arc::new(Ok(Arc::new(())))
     }
 }
 

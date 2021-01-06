@@ -93,9 +93,9 @@ impl WfNodeLoadStatus {
                 WfNodeLoadStatus::CancelStarted,
                 WfNodeEventType::CancelFinished,
             ) => Ok(WfNodeLoadStatus::CancelFinished),
-            _ => Err(Arc::new(anyhow!(
+            _ => Err(anyhow!(
                 "workflow node with status \"{}\": event \"{}\" is illegal"
-            ))),
+            )),
         }
     }
 }

@@ -28,7 +28,7 @@ use workflow_doodling::WfActionFunc;
 use workflow_doodling::WfBuilder;
 use workflow_doodling::WfContext;
 use workflow_doodling::WfExecutor;
-use workflow_doodling::WfResult;
+use workflow_doodling::WfFuncResult;
 use workflow_doodling::Workflow;
 
 /*
@@ -62,13 +62,13 @@ pub fn make_provision_workflow() -> Workflow {
     w.build()
 }
 
-async fn demo_prov_instance_create(_wfctx: WfContext) -> WfResult {
+async fn demo_prov_instance_create(_wfctx: WfContext) -> WfFuncResult {
     eprintln!("create instance");
     let instance_id = 1211u64;
     Ok(Arc::new(instance_id))
 }
 
-async fn demo_prov_vpc_alloc_ip(wfctx: WfContext) -> WfResult {
+async fn demo_prov_vpc_alloc_ip(wfctx: WfContext) -> WfFuncResult {
     eprintln!("allocate IP");
     let ip = String::from("10.120.121.122");
     let instance_id = wfctx.lookup::<u64>("instance_id")?;
@@ -79,7 +79,7 @@ async fn demo_prov_vpc_alloc_ip(wfctx: WfContext) -> WfResult {
 /*
  * The next two steps are in a subworkflow!
  */
-async fn demo_prov_server_alloc(wfctx: WfContext) -> WfResult {
+async fn demo_prov_server_alloc(wfctx: WfContext) -> WfFuncResult {
     eprintln!("allocate server (subworkflow)");
 
     let mut w = WfBuilder::new();
@@ -90,20 +90,29 @@ async fn demo_prov_server_alloc(wfctx: WfContext) -> WfResult {
     );
     let wf = w.build();
 
-    let result = wfctx.child_workflow(wf).await?;
-    Ok(Arc::new(result.downcast::<ServerAllocResult>().unwrap().server_id))
+    // XXX This is an ugly pattern, and the way we've done things, various
+    // callers are going to need to know about it.
+    // XXX XXX working here XXX XXX
+    match &*wfctx.child_workflow(wf).await {
+        Ok(result) => {
+            let server_id =
+                result.downcast::<ServerAllocResult>().unwrap().server_id;
+            Ok(Arc::new(server_id))
+        }
+        Err(error) => Err(*error),
+    }
 }
 
 struct ServerAllocResult {
     server_id: u64,
 }
 
-async fn demo_prov_server_pick(_wfctx: WfContext) -> WfResult {
+async fn demo_prov_server_pick(_wfctx: WfContext) -> WfFuncResult {
     eprintln!("    pick server");
     let server_id = 1212u64;
     Ok(Arc::new(server_id))
 }
-async fn demo_prov_server_reserve(wfctx: WfContext) -> WfResult {
+async fn demo_prov_server_reserve(wfctx: WfContext) -> WfFuncResult {
     eprintln!("    reserve server");
     let server_id = *wfctx.lookup::<u64>("server_id")?;
     assert_eq!(server_id, 1212);
@@ -111,27 +120,27 @@ async fn demo_prov_server_reserve(wfctx: WfContext) -> WfResult {
     Ok(Arc::new(ServerAllocResult { server_id }))
 }
 
-async fn demo_prov_volume_create(wfctx: WfContext) -> WfResult {
+async fn demo_prov_volume_create(wfctx: WfContext) -> WfFuncResult {
     eprintln!("create volume");
     let volume_id = 1213u64;
     assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
     Ok(Arc::new(volume_id))
 }
-async fn demo_prov_instance_configure(wfctx: WfContext) -> WfResult {
+async fn demo_prov_instance_configure(wfctx: WfContext) -> WfFuncResult {
     eprintln!("configure instance");
     assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
     assert_eq!(*wfctx.lookup::<u64>("volume_id")?, 1213);
     Ok(Arc::new(()))
 }
-async fn demo_prov_volume_attach(wfctx: WfContext) -> WfResult {
+async fn demo_prov_volume_attach(wfctx: WfContext) -> WfFuncResult {
     eprintln!("attach volume");
     assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
     assert_eq!(*wfctx.lookup::<u64>("volume_id")?, 1213);
     Ok(Arc::new(()))
 }
-async fn demo_prov_instance_boot(wfctx: WfContext) -> WfResult {
+async fn demo_prov_instance_boot(wfctx: WfContext) -> WfFuncResult {
     eprintln!("boot instance");
     assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
@@ -139,7 +148,7 @@ async fn demo_prov_instance_boot(wfctx: WfContext) -> WfResult {
     Ok(Arc::new(()))
 }
 
-async fn demo_prov_print(wfctx: WfContext) -> WfResult {
+async fn demo_prov_print(wfctx: WfContext) -> WfFuncResult {
     eprintln!("printing final state:");
     let instance_id = wfctx.lookup::<u64>("instance_id")?;
     eprintln!("  instance id: {}", *instance_id);
@@ -157,5 +166,5 @@ async fn main() {
     let w = make_provision_workflow();
     eprintln!("{:?}", w);
     let e = WfExecutor::new(w);
-    e.await.unwrap();
+    e.run().await.unwrap();
 }

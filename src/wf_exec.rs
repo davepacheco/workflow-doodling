@@ -4,17 +4,12 @@ use crate::wf_log::WfNodeEventType;
 use crate::wf_log::WfNodeLoadStatus;
 use crate::WfAction;
 use crate::WfContext;
-use crate::WfError;
 use crate::WfId;
 use crate::WfLog;
 use crate::WfOutput;
 use crate::WfResult;
 use crate::Workflow;
-use anyhow::anyhow;
 use core::future::Future;
-use core::pin::Pin;
-use core::task::Context;
-use core::task::Poll;
 use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::lock::Mutex;
@@ -115,9 +110,11 @@ struct TaskCompletion {
 pub struct WfExecutor {
     /* See `Workflow` */
     graph: Graph<String, ()>,
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
     node_names: BTreeMap<NodeIndex, String>,
     root: NodeIndex,
+
+    /** Channel for monitoring execution completion */
+    finish_tx: broadcast::Sender<WfResult>,
 
     /** Unique identifier for this execution */
     // TODO The nomenclature is problematic here.  This is really a workflow
@@ -126,7 +123,15 @@ pub struct WfExecutor {
     // Workflows.
     workflow_id: WfId,
     /** Persistent state */
+    // XXX put into live_state without Arc+Mutex?
     wflog: Arc<Mutex<WfLog>>,
+
+    live_state: Mutex<WfExecLiveState>,
+}
+
+struct WfExecLiveState {
+    /* See `Workflow` */
+    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
 
     /** Overall execution state */
     exec_state: WfState,
@@ -139,30 +144,8 @@ pub struct WfExecutor {
     /** Outputs saved by completed actions. */
     node_outputs: BTreeMap<NodeIndex, WfOutput>,
 
-    /** Channel for receiving completion messages from nodes. */
-    tx: mpsc::Sender<TaskCompletion>,
-    /** Channel for receiving completion messages from nodes. */
-    rx: mpsc::Receiver<TaskCompletion>,
-
-    /** Last node that completed. */
-    /*
-     * TODO This is really janky.  It's here just to have a way to get the
-     * output of the workflow as a whole based on the output of the last node
-     * completed.
-     */
-    last_finished: NodeIndex,
-
-    /** First error produced by a node, if any */
-    /* TODO probably better as a state enum.  See poll(). */
-    error: Option<WfError>,
-
-    /** Channel for monitoring execution completion */
-    finish_tx: broadcast::Sender<WfResult>,
-
-    /** Channel for monitoring state changes */
-    state_change_tx: broadcast::Sender<()>,
-    /** Channel for monitoring state changes */
-    state_change_rx: broadcast::Receiver<()>,
+    /** Final result of the workflow */
+    result: Option<WfResult>,
 }
 
 impl WfExecutor {
@@ -173,38 +156,27 @@ impl WfExecutor {
         // instance.
         let wflog = Arc::new(Mutex::new(WfLog::new("myself", workflow_id)));
         let mut node_states = BTreeMap::new();
-
-        /*
-         * In practice, each node can enqueue only two messages in its lifetime:
-         * one for completion of the action, and one for completion of the
-         * compensating action.  We bound this channel's size at twice the graph
-         * node count for this worst case.
-         */
-        let (tx, rx) = mpsc::channel(2 * w.graph.node_count());
         let (finish_tx, _) = broadcast::channel(1);
-        let (state_change_tx, state_change_rx) = broadcast::channel(1);
 
         node_states.insert(w.root, WfNodeState::Ready);
 
         WfExecutor {
             graph: w.graph,
-            launchers: w.launchers,
             node_names: w.node_names,
             root: w.root,
             workflow_id,
             wflog,
-            exec_state: WfState::Running,
-            node_states,
-            node_tasks: BTreeMap::new(),
-            node_outputs: BTreeMap::new(),
-            ready: vec![w.root],
-            tx,
-            rx,
-            last_finished: w.root,
-            error: None,
             finish_tx,
-            state_change_tx,
-            state_change_rx,
+
+            live_state: Mutex::new(WfExecLiveState {
+                launchers: w.launchers,
+                exec_state: WfState::Running,
+                node_states,
+                node_tasks: BTreeMap::new(),
+                node_outputs: BTreeMap::new(),
+                ready: vec![w.root],
+                result: None,
+            }),
         }
     }
 
@@ -221,7 +193,6 @@ impl WfExecutor {
         let mut done = false;
         let mut ready = Vec::new();
         let mut node_outputs = BTreeMap::new();
-        let mut last_finished = w.root;
         let mut nunfinished = 0;
 
         for node in topo_visitor.iter(&w.graph) {
@@ -257,7 +228,6 @@ impl WfExecutor {
                     /* XXX This would be a good place for a debug log. */
                     node_states.insert(node, WfNodeState::Done);
                     node_outputs.insert(node, Arc::clone(o));
-                    last_finished = node;
                 }
                 _ => {
                     // nunfinished += 1; // XXX re-insert when we remove todo!
@@ -277,29 +247,24 @@ impl WfExecutor {
         };
 
         /* See new(). */
-        let (tx, rx) = mpsc::channel(2 * w.graph.node_count());
         let (finish_tx, _) = broadcast::channel(1);
-        let (state_change_tx, state_change_rx) = broadcast::channel(1);
 
         WfExecutor {
             graph: w.graph,
-            launchers: w.launchers,
             node_names: w.node_names,
             root: w.root,
             workflow_id,
             wflog,
-            exec_state,
-            node_states,
-            node_tasks: BTreeMap::new(),
-            node_outputs,
-            ready,
-            tx,
-            rx,
-            last_finished,
-            error: None,
             finish_tx,
-            state_change_tx,
-            state_change_rx,
+            live_state: Mutex::new(WfExecLiveState {
+                launchers: w.launchers,
+                exec_state,
+                node_states,
+                node_tasks: BTreeMap::new(),
+                node_outputs,
+                ready,
+                result: None,
+            }),
         }
     }
 
@@ -315,17 +280,19 @@ impl WfExecutor {
     fn make_ancestor_tree(
         &self,
         tree: &mut BTreeMap<String, WfOutput>,
+        live_state: &WfExecLiveState,
         node: NodeIndex,
     ) {
         let ancestors = self.graph.neighbors_directed(node, Incoming);
         for ancestor in ancestors {
-            self.make_ancestor_tree_node(tree, ancestor);
+            self.make_ancestor_tree_node(tree, live_state, ancestor);
         }
     }
 
     fn make_ancestor_tree_node(
         &self,
         tree: &mut BTreeMap<String, WfOutput>,
+        live_state: &WfExecLiveState,
         node: NodeIndex,
     ) {
         if node == self.root {
@@ -334,7 +301,7 @@ impl WfExecutor {
 
         let name = self.node_names[&node].to_string();
         let node_state =
-            self.node_states.get(&node).unwrap_or(&WfNodeState::Blocked);
+            live_state.node_states.get(&node).unwrap_or(&WfNodeState::Blocked);
         /*
          * If we're in this function, it's because we're looking at the ancestor
          * of a node that's currently "Running".  All such ancestors must be
@@ -345,9 +312,9 @@ impl WfExecutor {
          * node.
          */
         assert_eq!(*node_state, WfNodeState::Done);
-        let output = &self.node_outputs[&node];
+        let output = &live_state.node_outputs[&node];
         tree.insert(name, Arc::clone(output));
-        self.make_ancestor_tree(tree, node);
+        self.make_ancestor_tree(tree, live_state, node);
     }
 
     /**
@@ -383,91 +350,116 @@ impl WfExecutor {
     /**
      * Advances execution of the WfExecutor.
      */
-    fn pump() {}
+    // TODO design notes XXX working here XXX XXX
+    // - this should be an async function.  We want to go that model rather than
+    //   implementing poll() and calling poll() on subfutures.
+    // - thus: the structure must be that it's just a loop reading messages
+    //   off of its channel
+    // - we want to expose state and control to consumers:
+    //   - current status
+    //   - pause/unpause/abort
+    //   - snapshot log
+    //   How can we do that?  This function needs an exclusive reference to
+    //   "self" in order to do a lot of its work.  We must decompose the state:
+    //   - actual execution state: we need exclusive access for most of work.
+    //     We could drop that while we're blocked.
+    //     option: mutex to protect it
+    //     option: provide a separate view of the state for consumers and have
+    //     _that_ protected by a lock (or atomic).  Would need a similar
+    //     mechanism for control parameters.
+    // Proposal 1:
+    // - WfExecutor has a few kinds of state:
+    //   - immutable: the stuff from Workflow (e.g., "graph", "node_names",
+    //     "root")
+    //   - view-and-control state:
+    //     - protected by lock
+    //     - at least: result
+    //     - problem: depending on how detailed we want the status to be, this
+    //       could be a complete copy of the live execution state
+    //   - live execution state
+    //     - wflog, exec_state, node_states, node_tasks, ready, node_outputs,
+    //       launchers
+    // - run_workflow() has:
+    //   - shared reference to immutable parameters
+    //   - reference to the _lock_ used for view-and-control state, a lock that
+    //     it takes only briefly to check if it's been paused/aborted and to
+    //     update the view state
+    //   - exclusive access to the live execution state
+    //
+    // Proposal 2:
+    // - We don't distinguish so carefully between view-and-control and live
+    //   execution state, on the grounds that consumers might want an
+    //   arbitrarily deep view of the current state.
+    // - run_workflow() explicitly takes and drops the lock protecting live
+    //   execution state when it updates it.
+    async fn run_workflow(&self) {
+        // XXX how to check this?  do we want to take the lock?  Note that it's
+        // not obvious it will be Running here -- consider the recovery case.
+        // assert_eq!(self.exec_state, WfState::Running);
 
-    /**
-     * Returns a Future that waits for this executor to finish.
-     */
-    // TODO-cleanup Is this the idiomatic way to do this?  It seems like people
-    // generally return a specific struct that impl's Future, but that seems a
-    // lot harder to do here.
-    fn wait_for_finish(&self) -> impl Future<Output = WfResult> {
-        let mut rx = self.finish_tx.subscribe();
-        async move {
-            rx.recv().await.expect(
-                "unexpected receive error on workflow completion channel",
-            )
-        }
-    }
-}
+        /*
+         * In practice, each node can enqueue only two messages in its lifetime:
+         * one for completion of the action, and one for completion of the
+         * compensating action.  We bound this channel's size at twice the graph
+         * node count for this worst case.
+         */
+        let (tx, mut rx) = mpsc::channel(2 * self.graph.node_count());
 
-impl Future for WfExecutor {
-    type Output = WfResult;
-
-    fn poll<'a>(
-        mut self: Pin<&'a mut WfExecutor>,
-        cx: &'a mut Context<'_>,
-    ) -> Poll<WfResult> {
-        if let Some(_) = &self.error {
-            // TODO We'd like to emit the error that we saved here but we still
-            // hold a reference to it.  Maybe use take()?  But that leaves the
-            // internal state rather confused.  Maybe there should be a separate
-            // boolean for whether an error has been recorded.
-            return Poll::Ready(Err(Arc::new(anyhow!(
-                "workflow {} failed",
-                self.workflow_id
-            ))));
-        }
-
-        if let WfState::Done = self.exec_state {
-            // TODO Besides being janky, this will probably blow up for the case
-            // of an empty workflow.
-            let node = &self.last_finished;
-            let node_state = &self.node_states[node];
-            assert_eq!(*node_state, WfNodeState::Done);
-            let output = &self.node_outputs[&node];
-            return Poll::Ready(Ok(Arc::clone(output)));
-        }
+        /*
+         * Kick off any nodes that are ready to run already.
+         */
+        self.kick_off_ready(&tx).await;
 
         /*
          * Process any messages available on our channel.
-         * TODO it seems like we should be writing this Future as an async
-         * function or the like instead of using this interface.
+         *
+         * It shouldn't be possible to get None back here.  That would mean that
+         * all of the consumers have closed their ends, but we still have a
+         * consumer of our own in "tx".
          */
-        assert_eq!(self.exec_state, WfState::Running);
-        let mut newly_ready = Vec::new();
-        while let Poll::Ready(maybe_message) = self.rx.poll_next_unpin(cx) {
-            /*
-             * It shouldn't be possible to get None back here.  That would mean
-             * that all of the consumers have closed their ends, but we still
-             * have a consumer of our own in self.tx.
-             */
-            assert!(maybe_message.is_some());
-            let message = maybe_message.unwrap();
+        loop {
+            let message = rx.next().await.expect("broken tx");
             let node = message.node_id;
-            let old_state = self
-                .node_states
-                .remove(&node)
-                .expect("node finished that was not running");
-            assert_eq!(old_state, WfNodeState::Running);
-            /*
-             * It would be nice to join on this task here, but we don't know for
-             * sure it's completed yet.  (It should be imminently, but we can't
-             * wait in this context.)
-             */
-            self.node_tasks.remove(&node).expect("no task for completed node");
 
-            let new_state = if let Ok(output) = message.result {
-                self.node_outputs.insert(node, Arc::clone(&output));
-                WfNodeState::Done
-            } else {
-                self.error = Some(message.result.unwrap_err());
-                todo!(); // TODO trigger unwind!
-                         // WfNodeState::Failed
+            let (task, new_state) = {
+                let mut live_state = self.live_state.lock().await;
+                let old_state = live_state
+                    .node_states
+                    .remove(&node)
+                    .expect("node finished that was not running");
+                assert_eq!(old_state, WfNodeState::Running);
+
+                /*
+                 * It would be nice to join on this task here, but we don't know for
+                 * sure it's completed yet.  (It should be imminently, but we can't
+                 * wait in this context.)
+                 */
+                let task = live_state
+                    .node_tasks
+                    .remove(&node)
+                    .expect("no task for completed node");
+
+                let new_state = if let Ok(ref output) = *message.result {
+                    live_state.node_outputs.insert(node, Arc::clone(&output));
+                    WfNodeState::Done
+                } else {
+                    todo!(); // TODO trigger unwind!
+                             // WfNodeState::Failed
+                };
+
+                live_state.node_states.insert(node, new_state);
+                live_state.result = Some(Arc::clone(&message.result));
+
+                (task, new_state)
             };
 
-            self.node_states.insert(node, new_state);
-            self.last_finished = node;
+            /*
+             * This should really not take long, as there's nothing else this
+             * task does after sending the message that we just received.  It's
+             * good to wait here to make sure things are cleaned up.
+             * TODO-robustness can we enforce this?
+             */
+            task.await.expect("node task failed unexpectedly");
 
             if new_state == WfNodeState::Failed {
                 continue;
@@ -475,57 +467,83 @@ impl Future for WfExecutor {
 
             assert_eq!(new_state, WfNodeState::Done);
 
-            for depnode in self.graph.neighbors_directed(node, Outgoing) {
-                /*
-                 * Check whether all of this node's incoming edges are now
-                 * satisfied.
-                 */
-                let mut okay = true;
-                for upstream in self.graph.neighbors_directed(depnode, Incoming)
-                {
-                    let node_state = self.node_states[&upstream];
-                    // XXX more general in the case of failure?
-                    if node_state != WfNodeState::Done {
-                        okay = false;
-                        break;
+            {
+                let mut live_state = self.live_state.lock().await;
+
+                // TODO this condition needs work.  It doesn't account for failed nodes
+                // or unwinding or anything.
+                if self.graph.node_count() == live_state.node_outputs.len() {
+                    live_state.exec_state = WfState::Done;
+                    self.finish_tx
+                        .send(Arc::clone(
+                            &live_state.result.as_ref().expect(
+                                "workflow ofinished without any result",
+                            ),
+                        ))
+                        .expect("failed to send finish message");
+                    break;
+                }
+
+                for depnode in self.graph.neighbors_directed(node, Outgoing) {
+                    /*
+                     * Check whether all of this node's incoming edges are now
+                     * satisfied.
+                     */
+                    let mut okay = true;
+                    for upstream in
+                        self.graph.neighbors_directed(depnode, Incoming)
+                    {
+                        let node_state = live_state.node_states[&upstream];
+                        // XXX more general in the case of failure?
+                        if node_state != WfNodeState::Done {
+                            okay = false;
+                            break;
+                        }
+                    }
+
+                    if okay {
+                        live_state
+                            .node_states
+                            .insert(depnode, WfNodeState::Ready)
+                            .expect_none("node already had state");
+                        live_state.ready.push(depnode);
                     }
                 }
-
-                if okay {
-                    newly_ready.push(depnode);
-                }
             }
-        }
 
-        /*
-         * Kick off any nodes that are ready to run.  (Right now, we kick off
-         * everything, so it might seem unnecessary to store this vector in
-         * "self" to begin with.  However, the intent is to add capacity limits,
-         * in which case we may return without having scheduled everything, and
-         * we want to track whatever's still ready to go.)
-         * TODO revisit dance with the vec to satisfy borrow rules
-         * TODO implement unwinding
-         */
-        for node in newly_ready {
-            self.node_states
-                .insert(node, WfNodeState::Ready)
-                .expect_none("node already had state");
-            self.ready.push(node);
+            self.kick_off_ready(&tx).await;
         }
-        let ready_to_run = self.ready.clone();
-        self.ready = Vec::new();
+    }
+
+    /*
+     * Kick off any nodes that are ready to run.  (Right now, we kick off
+     * everything, so it might seem unnecessary to store this vector in
+     * "self" to begin with.  However, the intent is to add capacity limits,
+     * in which case we may return without having scheduled everything, and
+     * we want to track whatever's still ready to go.)
+     * TODO revisit dance with the vec to satisfy borrow rules
+     * TODO implement unwinding
+     */
+    async fn kick_off_ready(&self, tx: &mpsc::Sender<TaskCompletion>) {
+        let mut live_state = self.live_state.lock().await;
+
+        let ready_to_run = live_state.ready.clone();
+        live_state.ready = Vec::new();
+
         for node in ready_to_run {
-            assert_eq!(self.node_states[&node], WfNodeState::Ready);
+            assert_eq!(live_state.node_states[&node], WfNodeState::Ready);
 
-            let wfaction =
-                self.launchers.remove(&node).expect("missing action for node");
+            let wfaction = live_state
+                .launchers
+                .remove(&node)
+                .expect("missing action for node");
             // TODO we could be much more efficient without copying this tree
             // each time.
             let mut ancestor_tree = BTreeMap::new();
-            self.make_ancestor_tree(&mut ancestor_tree, node);
-            let mut node_done_tx = self.tx.clone();
+            self.make_ancestor_tree(&mut ancestor_tree, &live_state, node);
+            let mut node_done_tx = tx.clone();
             // XXX should be Starting, but we have no way to change to Running
-            self.node_states.insert(node, WfNodeState::Running);
+            live_state.node_states.insert(node, WfNodeState::Running);
             let wflog = Arc::clone(&self.wflog);
             let task = tokio::spawn(async move {
                 let wflog1 = Arc::clone(&wflog);
@@ -533,7 +551,7 @@ impl Future for WfExecutor {
                     .await;
                 let exec_future = wfaction.do_it(WfContext { ancestor_tree });
                 let result = exec_future.await;
-                let event_type = if let Ok(ref output) = result {
+                let event_type = if let Ok(ref output) = *result {
                     WfNodeEventType::Succeeded(Arc::clone(&output))
                 } else {
                     WfNodeEventType::Failed
@@ -543,16 +561,64 @@ impl Future for WfExecutor {
                     .try_send(TaskCompletion { node_id: node, result })
                     .expect("unexpected channel failure");
             });
-            self.node_tasks.insert(node, task);
+            live_state.node_tasks.insert(node, task);
         }
+    }
 
-        // TODO this condition needs work.  It doesn't account for failed nodes
-        // or unwinding or anything.
-        if self.graph.node_count() == self.node_outputs.len() {
-            self.exec_state = WfState::Done;
-            return self.poll(cx);
+    pub fn run(&self) -> impl Future<Output = WfResult> + '_ {
+        let mut rx = self.finish_tx.subscribe();
+
+        async move {
+            self.run_workflow().await;
+            rx.recv().await.expect("failed to receive finish message")
         }
+    }
 
-        Poll::Pending
+    /**
+     * Returns a Future that waits for this executor to finish.
+     */
+    // TODO-cleanup Is this the idiomatic way to do this?  It seems like people
+    // generally return a specific struct that impl's Future, but that seems a
+    // lot harder to do here.
+    // TODO It might be nice if the returned future didn't have an implicit
+    // reference (by lifetime?) to "self"?  This currently isn't possible
+    // because we need to take the lock to check the state.  This might be
+    // possible if instead of making this a function you could call at any old
+    // time, we made this a Future returned by a start() method that kicks off
+    // execution.
+    pub fn wait_for_finish(&self) -> impl Future<Output = WfResult> + '_ {
+        /*
+         * It's important that we subscribe here, before we check self.state.
+         * This way, if the workflow is currently running but is done by the
+         * time we try to recv() on this channel, we're guaranteed that there
+         * will be a message there for us.  If we subscribed after the check,
+         * there would be a window in which we see the workflow running, but it
+         * completes before we subscribe, and we'd miss a wakeup.
+         * TODO-cleanup Is the above true?  Or is it impossible for the state to
+         * change because we have a reference to `self`?  If the above is true,
+         * it's somewhat surprising that this is so easy to get wrong.  Is there
+         * something more deeply wrong with our approach?
+         */
+        let mut rx = self.finish_tx.subscribe();
+
+        async move {
+            {
+                let live_state = self.live_state.lock().await;
+
+                if let WfState::Done = live_state.exec_state {
+                    assert!(live_state.result.is_some()); // XXX give WfState enum data instead?
+                    if let Some(ref result) = live_state.result {
+                        return Arc::clone(result);
+                    } else {
+                        panic!("workflow done with no result");
+                    }
+                }
+                assert!(live_state.result.is_none()); // XXX give WfState enum data instead?
+            }
+
+            rx.recv().await.expect(
+                "unexpected receive error on workflow completion channel",
+            )
+        }
     }
 }
