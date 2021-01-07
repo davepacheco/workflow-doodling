@@ -385,7 +385,7 @@ pub trait WfAction: Debug + Send + Sync {
      * data with [`WfContext::lookup`].  This is the _only_ supported means of
      * sharing state across actions within a workflow.
      */
-    async fn do_it(self: Arc<Self>, wfctx: WfContext) -> WfResult;
+    async fn do_it(&self, wfctx: WfContext) -> WfResult;
 }
 
 /**
@@ -490,7 +490,7 @@ where
     FuncType: Fn(WfContext) -> FutType + Send + Sync + 'static,
     FutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
 {
-    async fn do_it(self: Arc<Self>, wfctx: WfContext) -> WfResult {
+    async fn do_it(&self, wfctx: WfContext) -> WfResult {
         let fut = { (self.func)(wfctx) };
         fut.await
     }
@@ -512,7 +512,7 @@ struct WfActionUniversalStart {}
 
 #[async_trait]
 impl WfAction for WfActionUniversalStart {
-    async fn do_it(self: Arc<Self>, _: WfContext) -> WfResult {
+    async fn do_it(&self, _: WfContext) -> WfResult {
         eprintln!("universal start action");
         Ok(Arc::new(()))
     }
@@ -524,7 +524,7 @@ struct WfActionUniversalEnd {}
 
 #[async_trait]
 impl WfAction for WfActionUniversalEnd {
-    async fn do_it(self: Arc<Self>, _: WfContext) -> WfResult {
+    async fn do_it(&self, _: WfContext) -> WfResult {
         eprintln!("universal end action");
         Ok(Arc::new(()))
     }
