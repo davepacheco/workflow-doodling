@@ -110,7 +110,6 @@ async fn demo_prov_server_reserve(wfctx: WfContext) -> WfFuncResult {
     eprintln!("    reserve server");
     let server_id = *wfctx.lookup::<u64>("server_id")?;
     assert_eq!(server_id, 1212);
-    // XXX This is a janky way to provide output from the workflow itself
     Ok(Arc::new(ServerAllocResult { server_id }))
 }
 

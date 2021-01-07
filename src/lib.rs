@@ -530,7 +530,6 @@ impl WfAction for WfActionUniversalEnd {
     }
 }
 
-
 /**
  * Describes a directed acyclic graph of actions
  *

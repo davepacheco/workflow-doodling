@@ -137,7 +137,8 @@ pub struct WfExecutor {
     /* See `Workflow` */
     graph: Graph<String, ()>,
     node_names: BTreeMap<NodeIndex, String>,
-    root: NodeIndex,
+    start_node: NodeIndex,
+    end_node: NodeIndex,
 
     /** Channel for monitoring execution completion */
     finish_tx: broadcast::Sender<()>,
@@ -244,7 +245,8 @@ impl WfExecutor {
         Ok(WfExecutor {
             graph: w.graph,
             node_names: w.node_names,
-            root: w.start,
+            start_node: w.start,
+            end_node: w.end,
             workflow_id,
             finish_tx,
             live_state: Arc::new(Mutex::new(live_state)),
@@ -278,7 +280,7 @@ impl WfExecutor {
         live_state: &WfExecLiveState,
         node: NodeIndex,
     ) {
-        if node == self.root {
+        if node == self.start_node {
             return;
         }
 
@@ -321,7 +323,7 @@ impl WfExecutor {
      * one that has been recovered from persistent state.
      */
     async fn run_workflow(&self) {
-        // XXX how to check this?  do we want to take the lock?  Note that it's
+        // TODO how to check this?  do we want to take the lock?  Note that it's
         // not obvious it will be Running here -- consider the recovery case.
         // TODO It would also be nice every time we block on the channel to
         // assert that there are outstanding operations.
@@ -510,28 +512,39 @@ impl WfExecutor {
         name: &str,
     ) -> Result<Arc<T>, WfError> {
         let live_state = self.live_state.lock().await;
-        /* XXX This is awful */
+        /* TODO This is awful */
         for node_id in live_state.node_outputs.keys() {
             let node_name = self.node_names.get(node_id);
             if node_name.is_none() {
-                assert_eq!(node_id.index() as u64, 0);
+                assert!(
+                    *node_id == self.start_node || *node_id == self.end_node
+                );
                 continue;
             }
 
             if node_name.unwrap() == name {
+                let node_state = live_state
+                    .node_states
+                    .get(&node_id)
+                    .unwrap_or(&WfNodeState::Blocked);
+                if *node_state != WfNodeState::Done {
+                    return Err(anyhow!(
+                        "node with name \"{}\" did not finish \
+                        or did not finish successfully",
+                        name,
+                    ));
+                }
                 let item = live_state.node_outputs.get(&node_id).unwrap();
-                let specific_item = Arc::clone(item)
-                    .downcast::<T>()
-                    .expect(&format!("node {} produced unexpected type", name));
+                let specific_item =
+                    Arc::clone(item).downcast::<T>().expect(&format!(
+                        "node with name \"{}\" produced unexpected type",
+                        name
+                    ));
                 return Ok(specific_item);
             }
         }
 
-        // XXX Should be a graceful error if the node is valid in the workflow
-        panic!(
-            "node {} not part of workflow or did not finish successfully",
-            name
-        );
+        panic!("node with name \"{}\" is not part of the workflow", name);
     }
 }
 
@@ -552,6 +565,7 @@ impl WfExecutor {
  * moment we anticipate wanting pretty detailed debug information (like what
  * outputs were produced by what steps), so the view would essentially be a
  * whole copy of this object.
+ * TODO This would be a good place for a debug log.
  */
 struct WfExecLiveState {
     /** See [`Workflow::launchers`] */
@@ -566,7 +580,7 @@ struct WfExecLiveState {
     /** Nodes that have not started but whose dependencies are satisfied */
     ready: Vec<NodeIndex>,
     /** Outputs saved by completed actions. */
-    // XXX may as well store errors too
+    // TODO may as well store errors too
     node_outputs: BTreeMap<NodeIndex, WfOutput>,
 
     /** Persistent state */
@@ -611,11 +625,6 @@ impl WfExecLiveState {
     }
 
     fn node_make_done(&mut self, node_id: NodeIndex, output: &WfResult) {
-        /*
-         * XXX This panic ought to be a graceful error during recovery because
-         * it reflects an invalid log.
-         */
-        /* TODO This would be a good place for a debug log. */
         if let Ok(output) = output {
             self.node_outputs
                 .insert(node_id, Arc::clone(output))
@@ -666,7 +675,7 @@ struct WfRecovery {
     /** Nodes that have not started but whose dependencies are satisfied */
     ready: Vec<NodeIndex>,
     /** Outputs saved by completed actions. */
-    // XXX may as well store errors too
+    // TODO may as well store errors too
     node_outputs: BTreeMap<NodeIndex, WfOutput>,
 }
 
@@ -765,7 +774,7 @@ fn parents_satisfied(
 ) -> bool {
     for p in graph.neighbors_directed(node_id, Incoming) {
         let node_state = node_states.get(&p).unwrap_or(&WfNodeState::Blocked);
-        // XXX more general in the case of failure?
+        // TODO more general in the case of failure?
         if *node_state != WfNodeState::Done {
             return false;
         }
