@@ -23,6 +23,7 @@ use petgraph::Incoming;
 use petgraph::Outgoing;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -546,6 +547,69 @@ impl WfExecutor {
 
         panic!("node with name \"{}\" is not part of the workflow", name);
     }
+
+    // TODO-liveness does this writer need to be async?
+    pub async fn print_status(
+        &self,
+        out: &mut dyn io::Write,
+    ) -> io::Result<()> {
+        /* TODO-cleanup There must be a better way to do this. */
+        let mut max_depth_of_node: BTreeMap<NodeIndex, usize> = BTreeMap::new();
+        max_depth_of_node.insert(self.start_node, 0);
+
+        let mut nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>> =
+            BTreeMap::new();
+
+        let topo_visitor = Topo::new(&self.graph);
+        for node in topo_visitor.iter(&self.graph) {
+            if let Some(d) = max_depth_of_node.get(&node) {
+                assert_eq!(*d, 0);
+                assert_eq!(node, self.start_node);
+                assert_eq!(max_depth_of_node.len(), 1);
+                continue;
+            }
+
+            if node == self.end_node {
+                continue;
+            }
+
+            let mut max_parent_depth: Option<usize> = None;
+            for p in self.graph.neighbors_directed(node, Incoming) {
+                let parent_depth = *max_depth_of_node.get(&p).unwrap();
+                match max_parent_depth {
+                    Some(x) if x >= parent_depth => (),
+                    _ => max_parent_depth = Some(parent_depth),
+                };
+            }
+
+            let depth = max_parent_depth.unwrap() + 1;
+            max_depth_of_node.insert(node, depth);
+
+            nodes_at_depth.entry(depth).or_insert(Vec::new()).push(node);
+        }
+
+        let live_state = self.live_state.lock().await;
+
+        write!(out, "workflow execution: {}\n", self.workflow_id)?;
+        for (d, nodes) in nodes_at_depth {
+            write!(out, "  stage {:>2}: ", d)?;
+            if nodes.len() == 1 {
+                let node = nodes[0];
+                let node_name = &self.node_names[&node];
+                let node_state = live_state.node_state(node);
+                write!(out, "{}: {}\n", node_state, node_name)?;
+            } else {
+                write!(out, "(actions in parallel)\n")?;
+                for node in nodes {
+                    let node_name = &self.node_names[&node];
+                    let node_state = live_state.node_state(node);
+                    write!(out, "  {:>12}{}: {}\n", "", node_state, node_name)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /**
@@ -592,6 +656,10 @@ impl WfExecLiveState {
         assert!(self.ready.is_empty());
         assert_eq!(self.exec_state, WfState::Running);
         self.exec_state = WfState::Done;
+    }
+
+    pub fn node_state(&self, node_id: NodeIndex) -> WfNodeState {
+        self.node_states.get(&node_id).copied().unwrap_or(WfNodeState::Blocked)
     }
 
     fn node_make_state(&mut self, node_id: NodeIndex, state: WfNodeState) {

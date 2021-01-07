@@ -23,6 +23,7 @@
  *          boot instance
  */
 
+use std::io;
 use std::sync::Arc;
 use workflow_doodling::WfActionFunc;
 use workflow_doodling::WfBuilder;
@@ -156,8 +157,15 @@ async fn demo_prov_print(wfctx: WfContext) -> WfFuncResult {
 
 #[tokio::main]
 async fn main() {
+    let mut stderr = io::stderr();
     let w = make_provision_workflow();
     eprintln!("{:?}", w);
     let e = WfExecutor::new(w);
+
+    eprintln!("initial state");
+    e.print_status(&mut stderr).await.unwrap();
+    eprintln!("*** running workflow ***");
     e.run().await;
+    eprintln!("final state");
+    e.print_status(&mut stderr).await.unwrap();
 }
