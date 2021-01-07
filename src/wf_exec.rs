@@ -10,6 +10,7 @@ use crate::WfLog;
 use crate::WfOutput;
 use crate::WfResult;
 use crate::Workflow;
+use anyhow::anyhow;
 use core::future::Future;
 use futures::channel::mpsc;
 use futures::lock::Mutex;
@@ -117,7 +118,7 @@ struct TaskParams {
     /** Ancestor tree for this node.  See [`WfContext`]. */
     ancestor_tree: BTreeMap<String, WfOutput>,
     /** The action itself that we're executing. */
-    action: Box<dyn WfAction>,
+    action: Arc<dyn WfAction>,
 }
 
 /**
@@ -158,98 +159,96 @@ impl WfExecutor {
         // TODO "myself" here should be a hostname or other identifier for this
         // instance.
         let wflog = WfLog::new("myself", workflow_id);
-        let (finish_tx, _) = broadcast::channel(1);
-
-        let mut live_state = WfExecLiveState::new(w.launchers, wflog);
-        live_state.node_make_ready(w.root);
-
-        WfExecutor {
-            graph: w.graph,
-            node_names: w.node_names,
-            root: w.root,
-            workflow_id,
-            finish_tx,
-
-            live_state: Arc::new(Mutex::new(live_state)),
-        }
+        WfExecutor::new_recover(w, wflog).unwrap()
     }
 
     /**
      * Create an executor to run the given workflow that may have already
      * started, using the given log events.
      */
-    // TODO the panics and assertions in this function should be operational
-    // errors instead.  We may want to go so far as to have a different thing
-    // like a WfExecLiveState for recovery only, where preconditions are checked
-    // differently.  (The specific preconditions we'd like to check are
-    // different, too.)
-    pub fn new_recover(w: Workflow, wflog: WfLog) -> WfExecutor {
+    pub fn new_recover(
+        w: Workflow,
+        wflog: WfLog,
+    ) -> Result<WfExecutor, WfError> {
+        /*
+         * During recovery, there's a fine line between operational errors and
+         * programmer errors.  If we discover semantically invalid workflow
+         * state, that's an operational error that we must handle gracefully.
+         * We use lots of assertions to check invariants about our own process
+         * for loading the state.  We panic if those are violated.  For example,
+         * if we find that we've loaded the same node twice, that's a bug in
+         * this code right here (which walks each node of the graph exactly
+         * once), not a result of corrupted database state.
+         */
         let workflow_id = wflog.workflow_id;
         let topo_visitor = Topo::new(&w.graph);
-        let mut done = false;
-        let mut nunfinished = 0;
-        let mut live_state = WfExecLiveState::new(w.launchers, wflog);
+        let mut recovery = WfRecovery::new();
 
-        for node in topo_visitor.iter(&w.graph) {
-            // TODO Figure out the best way to check this in recovery context.
-            // assert!(!node_states.contains_key(&node));
-            // assert!(!node_outputs.contains_key(&node));
+        for node_id in topo_visitor.iter(&w.graph) {
+            let node_status =
+                wflog.load_status_for_node(node_id.index() as u64);
 
-            let node_status = live_state.load_status_for_node(node);
-            if let WfNodeLoadStatus::NeverStarted = node_status {
-                nunfinished += 1;
-                done = true;
-                continue;
-            }
-
-            if done {
-                panic!(
-                    "encountered node in invalid state topologically \
-                    after one that never started (state={:?})",
-                    node_status
-                );
+            /*
+             * Validate this node's state against its parent nodes' states.  By
+             * induction, this validates everything in the graph from the start
+             * node to the current node.
+             */
+            for parent in w.graph.neighbors_directed(node_id, Incoming) {
+                let parent_state = recovery.node_state(parent);
+                if !recovery_validate_parent(parent_state, node_status) {
+                    return Err(anyhow!(
+                        "recovery for workflow {}: node {:?}: \
+                        load state is \"{:?}\", which is illegal for parent \"
+                        state \"{}\"",
+                        workflow_id,
+                        node_id,
+                        node_status,
+                        parent_state,
+                    ));
+                }
             }
 
             match node_status {
-                WfNodeLoadStatus::NeverStarted => (), /* handled earlier */
+                WfNodeLoadStatus::NeverStarted => {
+                    /*
+                     * If the parent nodes are satisfied, then we must mark this
+                     * node ready to run.
+                     */
+                    if parents_satisfied(
+                        &w.graph,
+                        &recovery.node_states,
+                        node_id,
+                    ) {
+                        recovery.node_ready(node_id);
+                    }
+                }
                 WfNodeLoadStatus::Started => {
                     // TODO-correctness should not log another "start" record
-                    // TODO-robustness check that parents have been satisfied
-                    /* XXX This would be a good place for a debug log. */
-                    nunfinished += 1;
-                    live_state.node_make_ready(node);
+                    recovery.node_ready(node_id);
                 }
                 WfNodeLoadStatus::Succeeded(o) => {
-                    live_state.node_make_done(node, &Ok(Arc::clone(o)));
+                    recovery.node_succeeded(node_id, Arc::clone(o));
                 }
                 _ => {
-                    // nunfinished += 1; // XXX re-insert when we remove todo!
-                    todo!("handle node state");
+                    todo!("handle cancellation states");
                 }
             }
         }
 
-        if nunfinished == 0 {
-            // TODO figure out how best to check this in recovery context.
-            // assert_eq!(node_outputs.len(), w.graph.node_count());
-            // assert_eq!(node_states.len(), w.graph.node_count());
-            // assert!(ready.is_empty());
-            live_state.mark_workflow_done();
-            // TODO do we need to send a message on "finish_tx"?  Obviously that
-            // won't really work here.
-        }
-
         /* See new(). */
+        // TODO do we need to send a message on "finish_tx" if the workflow is
+        // already done?  Obviously that won't really work here.
         let (finish_tx, _) = broadcast::channel(1);
+        let live_state = recovery.to_live_state(&w, wflog);
 
-        WfExecutor {
+        Ok(WfExecutor {
             graph: w.graph,
             node_names: w.node_names,
-            root: w.root,
+            root: w.start,
             workflow_id,
             finish_tx,
             live_state: Arc::new(Mutex::new(live_state)),
-        }
+        })
     }
 
     /**
@@ -484,22 +483,8 @@ impl WfExecutor {
         }
 
         for depnode in self.graph.neighbors_directed(node_id, Outgoing) {
-            /*
-             * Check whether all of this node's incoming edges are now
-             * satisfied.
-             */
-            let mut okay = true;
-            for upstream in self.graph.neighbors_directed(depnode, Incoming) {
-                let node_state =
-                    *live_state.node_states.get(&upstream).unwrap();
-                // XXX more general in the case of failure?
-                if node_state != WfNodeState::Done {
-                    okay = false;
-                    break;
-                }
-            }
-
-            if okay {
+            if parents_satisfied(&self.graph, &live_state.node_states, depnode)
+            {
                 live_state.node_make_ready(depnode);
             }
         }
@@ -570,7 +555,7 @@ impl WfExecutor {
  */
 struct WfExecLiveState {
     /** See [`Workflow::launchers`] */
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
+    launchers: BTreeMap<NodeIndex, Arc<dyn WfAction>>,
 
     /** Overall execution state */
     exec_state: WfState,
@@ -589,21 +574,6 @@ struct WfExecLiveState {
 }
 
 impl WfExecLiveState {
-    pub fn new(
-        launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
-        wflog: WfLog,
-    ) -> WfExecLiveState {
-        WfExecLiveState {
-            launchers,
-            exec_state: WfState::Running,
-            node_states: BTreeMap::new(),
-            node_tasks: BTreeMap::new(),
-            node_outputs: BTreeMap::new(),
-            ready: Vec::new(),
-            wflog,
-        }
-    }
-
     fn mark_workflow_done(&mut self) {
         assert!(self.ready.is_empty());
         assert_eq!(self.exec_state, WfState::Running);
@@ -684,8 +654,181 @@ impl WfExecLiveState {
             .expect("node in state \"done\" with no output");
         Arc::clone(&output)
     }
+}
 
-    fn load_status_for_node(&self, node_id: NodeIndex) -> &WfNodeLoadStatus {
-        self.wflog.load_status_for_node(node_id.index() as u64)
+/**
+ * Encapsulates live state associated with workflow recovery
+ */
+/* TODO This would be a good place to put a bunch of debug logging. */
+struct WfRecovery {
+    /** Execution state for each node in the graph */
+    node_states: BTreeMap<NodeIndex, WfNodeState>,
+    /** Nodes that have not started but whose dependencies are satisfied */
+    ready: Vec<NodeIndex>,
+    /** Outputs saved by completed actions. */
+    // XXX may as well store errors too
+    node_outputs: BTreeMap<NodeIndex, WfOutput>,
+}
+
+impl WfRecovery {
+    fn new() -> WfRecovery {
+        WfRecovery {
+            node_states: BTreeMap::new(),
+            ready: Vec::new(),
+            node_outputs: BTreeMap::new(),
+        }
+    }
+
+    pub fn node_state(&self, node_id: NodeIndex) -> WfNodeState {
+        self.node_states.get(&node_id).copied().unwrap_or(WfNodeState::Blocked)
+    }
+
+    fn node_recover_state(
+        &mut self,
+        node_id: NodeIndex,
+        new_state: WfNodeState,
+    ) {
+        let old_state = self.node_states.insert(node_id, new_state);
+        if let Some(old_state) = old_state {
+            panic!(
+                "duplicate recovery for node {:?}: previously \
+                \"{}\", now trying to mark \"{}\"",
+                node_id, old_state, new_state,
+            );
+        }
+    }
+
+    pub fn node_ready(&mut self, node_id: NodeIndex) {
+        self.node_recover_state(node_id, WfNodeState::Ready);
+        self.ready.push(node_id);
+    }
+
+    pub fn node_succeeded(&mut self, node_id: NodeIndex, output: WfOutput) {
+        self.node_recover_state(node_id, WfNodeState::Done);
+        self.node_outputs.insert(node_id, output).expect_none(
+            "recorded duplicate output for a node with no duplicate state",
+        );
+    }
+
+    pub fn to_live_state(self, w: &Workflow, wflog: WfLog) -> WfExecLiveState {
+        /*
+         * TODO This would be a good time to run some consistency checks.  For
+         * example, are there any nodes that have started whose ancestors have
+         * not finished? etc.
+         */
+        /*
+         * At this point, we've completed recovery for all the nodes in the log.
+         * Now we have to determine if we're currently running the workflow
+         * forward, running it backwards (unwinding), or finished one way or the
+         * other.  WWe can determine this by looking at the start and end nodes
+         * of the graph.
+         */
+        let start_state = self.node_state(w.start);
+        assert_ne!(start_state, WfNodeState::Blocked);
+        let end_state = self.node_state(w.end);
+        /* TODO There are more cases than this. */
+        let exec_state = if end_state == WfNodeState::Done {
+            /*
+             * It would be a violation of our own invariants if we haven't
+             * accounted for the results for every node.  (An inconsistent log
+             * should not allow us to get here because when we recovered the
+             * "done" record for the end node, we would have found an ancestor
+             * that was not also "done".)
+             */
+            assert_eq!(self.node_outputs.len(), w.graph.node_count());
+            assert_eq!(self.node_states.len(), w.graph.node_count());
+            assert!(self.ready.is_empty());
+            WfState::Done
+        } else {
+            WfState::Running
+        };
+
+        WfExecLiveState {
+            launchers: w.launchers.clone(),
+            wflog,
+            ready: self.ready,
+            exec_state,
+            node_states: self.node_states,
+            node_outputs: self.node_outputs,
+            node_tasks: BTreeMap::new(),
+        }
+    }
+}
+
+/**
+ * Checks whether all of this node's incoming edges are now satisfied.
+ */
+fn parents_satisfied(
+    graph: &Graph<String, ()>,
+    node_states: &BTreeMap<NodeIndex, WfNodeState>,
+    node_id: NodeIndex,
+) -> bool {
+    for p in graph.neighbors_directed(node_id, Incoming) {
+        let node_state = node_states.get(&p).unwrap_or(&WfNodeState::Blocked);
+        // XXX more general in the case of failure?
+        if *node_state != WfNodeState::Done {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Returns true if the parent node's state is valid for the given child node's
+ * load status.
+ */
+fn recovery_validate_parent(
+    parent_state: WfNodeState,
+    child_load_status: &WfNodeLoadStatus,
+) -> bool {
+    match child_load_status {
+        /*
+         * If the child node has started, finished successfully, finished with
+         * an error, or even started cancelling, the only allowed state for the
+         * parent node is "done".  The states prior to "done" are ruled out
+         * because we execute nodes in dependency order.  "failing" and "failed"
+         * are ruled out because we do not execute nodes whose parents failed.
+         * The cancelling states are ruled out because we cancel in
+         * reverse-dependency order, so we cannot have started cancelling the
+         * parent if the child node has not finished cancelling.  (A subtle but
+         * important implementation detail is that we do not cancel a node that
+         * has not started execution.  If we did, then the "cancel started" load
+         * state could be associated with a parent that failed.)
+         */
+        WfNodeLoadStatus::Started => parent_state == WfNodeState::Done,
+        WfNodeLoadStatus::Succeeded(_) => parent_state == WfNodeState::Done,
+        WfNodeLoadStatus::Failed => parent_state == WfNodeState::Done,
+        WfNodeLoadStatus::CancelStarted => parent_state == WfNodeState::Done,
+
+        /*
+         * If we've finished cancelling the child node, then the parent must be
+         * either "done" or one of the cancelling states.
+         */
+        WfNodeLoadStatus::CancelFinished => match parent_state {
+            WfNodeState::Done => true,
+            WfNodeState::StartingCancel => true,
+            WfNodeState::Cancelling => true,
+            WfNodeState::FinishingCancel => true,
+            WfNodeState::Cancelled => true,
+            _ => false,
+        },
+
+        /*
+         * If a node has never started, the only illegal states for a parent are
+         * those associated with cancelling, since the child must be cancelled
+         * first.
+         */
+        WfNodeLoadStatus::NeverStarted => match parent_state {
+            WfNodeState::Blocked => true,
+            WfNodeState::Ready => true,
+            WfNodeState::Starting => true,
+            WfNodeState::Running => true,
+            WfNodeState::Finishing => true,
+            WfNodeState::Done => true,
+            WfNodeState::Failing => true,
+            WfNodeState::Failed => true,
+            _ => false,
+        },
     }
 }

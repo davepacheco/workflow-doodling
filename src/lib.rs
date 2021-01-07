@@ -322,6 +322,7 @@
 
 #![feature(type_name_of_val)]
 #![feature(option_expect_none)]
+#![feature(option_unwrap_none)]
 #![deny(elided_lifetimes_in_paths)]
 
 mod wf_exec;
@@ -370,7 +371,7 @@ pub type WfCancelResult = Result<(), WfError>;
  * with dependencies between them.
  */
 #[async_trait]
-pub trait WfAction: Debug + Send {
+pub trait WfAction: Debug + Send + Sync {
     /**
      * Executes the action for this workflow node, whatever that is.  Actions
      * function like requests in distributed sagas: critically, they must be
@@ -384,7 +385,7 @@ pub trait WfAction: Debug + Send {
      * data with [`WfContext::lookup`].  This is the _only_ supported means of
      * sharing state across actions within a workflow.
      */
-    async fn do_it(self: Box<Self>, wfctx: WfContext) -> WfResult;
+    async fn do_it(self: Arc<Self>, wfctx: WfContext) -> WfResult;
 }
 
 /**
@@ -458,8 +459,8 @@ impl WfContext {
  */
 pub struct WfActionFunc<FutType, FuncType>
 where
-    FuncType: Fn(WfContext) -> FutType + Send + 'static,
-    FutType: Future<Output = WfFuncResult> + Send + 'static,
+    FuncType: Fn(WfContext) -> FutType + Send + Sync + 'static,
+    FutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
 {
     func: FuncType,
     phantom: PhantomData<FutType>,
@@ -467,29 +468,29 @@ where
 
 impl<FutType, FuncType> WfActionFunc<FutType, FuncType>
 where
-    FuncType: Fn(WfContext) -> FutType + Send + 'static,
-    FutType: Future<Output = WfFuncResult> + Send + 'static,
+    FuncType: Fn(WfContext) -> FutType + Send + Sync + 'static,
+    FutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
 {
     /**
      * Wrap a function in a `WfActionFunc`
      *
-     * We return the result as a `Box<dyn WfAction>` so that it can be used
+     * We return the result as a `Arc<dyn WfAction>` so that it can be used
      * directly where `WfAction`s are expected.  The struct `WfActionFunc` has
      * no interfaces of its own so there's generally no need to have the
      * specific type.
      */
-    pub fn new_action(f: FuncType) -> Box<dyn WfAction> {
-        Box::new(WfActionFunc { func: f, phantom: PhantomData })
+    pub fn new_action(f: FuncType) -> Arc<dyn WfAction> {
+        Arc::new(WfActionFunc { func: f, phantom: PhantomData })
     }
 }
 
 #[async_trait]
 impl<FutType, FuncType> WfAction for WfActionFunc<FutType, FuncType>
 where
-    FuncType: Fn(WfContext) -> FutType + Send + 'static,
-    FutType: Future<Output = WfFuncResult> + Send + 'static,
+    FuncType: Fn(WfContext) -> FutType + Send + Sync + 'static,
+    FutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
 {
-    async fn do_it(self: Box<Self>, wfctx: WfContext) -> WfResult {
+    async fn do_it(self: Arc<Self>, wfctx: WfContext) -> WfResult {
         let fut = { (self.func)(wfctx) };
         fut.await
     }
@@ -497,25 +498,38 @@ where
 
 impl<FutType, FuncType> Debug for WfActionFunc<FutType, FuncType>
 where
-    FuncType: Fn(WfContext) -> FutType + Send + 'static,
-    FutType: Future<Output = WfFuncResult> + Send + 'static,
+    FuncType: Fn(WfContext) -> FutType + Send + Sync + 'static,
+    FutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&std::any::type_name_of_val(&self.func))
     }
 }
 
-/** Placeholder type for the initial node in a graph. */
+/** Placeholder type for the start node in a graph. */
 #[derive(Debug)]
-struct WfActionUniversalFirst {}
+struct WfActionUniversalStart {}
 
 #[async_trait]
-impl WfAction for WfActionUniversalFirst {
-    async fn do_it(self: Box<Self>, _: WfContext) -> WfResult {
-        eprintln!("universal first action");
+impl WfAction for WfActionUniversalStart {
+    async fn do_it(self: Arc<Self>, _: WfContext) -> WfResult {
+        eprintln!("universal start action");
         Ok(Arc::new(()))
     }
 }
+
+/** Placeholder type for the end node in a graph. */
+#[derive(Debug)]
+struct WfActionUniversalEnd {}
+
+#[async_trait]
+impl WfAction for WfActionUniversalEnd {
+    async fn do_it(self: Arc<Self>, _: WfContext) -> WfResult {
+        eprintln!("universal end action");
+        Ok(Arc::new(()))
+    }
+}
+
 
 /**
  * Describes a directed acyclic graph of actions
@@ -525,9 +539,12 @@ impl WfAction for WfActionUniversalFirst {
  */
 pub struct Workflow {
     graph: Graph<String, ()>,
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
+    // TODO Maybe the WfExec should just have a reference to the workflow rather
+    // than needing Arc<dyn WfAction> and copying these other fields.
+    launchers: BTreeMap<NodeIndex, Arc<dyn WfAction>>,
     node_names: BTreeMap<NodeIndex, String>,
-    root: NodeIndex,
+    start: NodeIndex,
+    end: NodeIndex,
 }
 
 impl Debug for Workflow {
@@ -551,7 +568,7 @@ pub struct WfBuilder {
     /** DAG of workflow nodes.  Weights for nodes are debug labels. */
     graph: Graph<String, ()>,
     /** For each node, the [`WfAction`] executed at that node. */
-    launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
+    launchers: BTreeMap<NodeIndex, Arc<dyn WfAction>>,
     /**
      * For each node, the name of the node.  This is used for data stored by
      * that node.
@@ -568,8 +585,8 @@ impl WfBuilder {
         let mut graph = Graph::new();
         let mut launchers = BTreeMap::new();
         let node_names = BTreeMap::new();
-        let first: Box<dyn WfAction + 'static> =
-            Box::new(WfActionUniversalFirst {});
+        let first: Arc<dyn WfAction + 'static> =
+            Arc::new(WfActionUniversalStart {});
         let label = format!("{:?}", first);
         let root = graph.add_node(label);
         launchers.insert(root, first).expect_none("empty map had an element");
@@ -590,7 +607,7 @@ impl WfBuilder {
      * the action so that descendant nodes can access it using
      * [`WfContext::lookup`].
      */
-    pub fn append(&mut self, name: &str, action: Box<dyn WfAction>) {
+    pub fn append(&mut self, name: &str, action: Arc<dyn WfAction>) {
         let label = format!("{:?}", action);
         let newnode = self.graph.add_node(label);
         self.launchers
@@ -614,7 +631,7 @@ impl WfBuilder {
      * is a vector of `(name, action)` tuples analogous to the arguments to
      * [`WfBuilder::append`].
      */
-    pub fn append_parallel(&mut self, actions: Vec<(&str, Box<dyn WfAction>)>) {
+    pub fn append_parallel(&mut self, actions: Vec<(&str, Arc<dyn WfAction>)>) {
         let newnodes: Vec<NodeIndex> = actions
             .into_iter()
             .map(|(n, a)| {
@@ -659,12 +676,27 @@ impl WfBuilder {
      * workflows could append to themselves while they're running, and that
      * might be okay?
      */
-    pub fn build(self) -> Workflow {
+    pub fn build(mut self) -> Workflow {
+        /*
+         * Append an "end" node so that we can easily tell when the workflow has
+         * completed.
+         */
+        let last: Arc<dyn WfAction + 'static> =
+            Arc::new(WfActionUniversalEnd {});
+        let label = format!("{:?}", last);
+        let newnode = self.graph.add_node(label);
+        self.launchers.insert(newnode, last).unwrap_none();
+
+        for node in &self.last_added {
+            self.graph.add_edge(*node, newnode, ());
+        }
+
         Workflow {
             graph: self.graph,
             launchers: self.launchers,
-            root: self.root,
             node_names: self.node_names,
+            start: self.root,
+            end: newnode,
         }
     }
 }
