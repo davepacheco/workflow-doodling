@@ -10,7 +10,6 @@ use crate::WfLog;
 use crate::WfOutput;
 use crate::WfResult;
 use crate::Workflow;
-use anyhow::anyhow;
 use core::future::Future;
 use futures::channel::mpsc;
 use futures::lock::Mutex;
@@ -160,8 +159,9 @@ impl WfExecutor {
         // instance.
         let wflog = WfLog::new("myself", workflow_id);
         let (finish_tx, _) = broadcast::channel(1);
-        let mut node_states = BTreeMap::new();
-        node_states.insert(w.root, WfNodeState::Ready);
+
+        let mut live_state = WfExecLiveState::new(w.launchers, wflog);
+        live_state.node_make_ready(w.root);
 
         WfExecutor {
             graph: w.graph,
@@ -170,15 +170,7 @@ impl WfExecutor {
             workflow_id,
             finish_tx,
 
-            live_state: Arc::new(Mutex::new(WfExecLiveState {
-                launchers: w.launchers,
-                exec_state: WfState::Running,
-                node_states,
-                node_tasks: BTreeMap::new(),
-                node_outputs: BTreeMap::new(),
-                ready: vec![w.root],
-                wflog,
-            })),
+            live_state: Arc::new(Mutex::new(live_state)),
         }
     }
 
@@ -187,21 +179,23 @@ impl WfExecutor {
      * started, using the given log events.
      */
     // TODO the panics and assertions in this function should be operational
-    // errors instead.
+    // errors instead.  We may want to go so far as to have a different thing
+    // like a WfExecLiveState for recovery only, where preconditions are checked
+    // differently.  (The specific preconditions we'd like to check are
+    // different, too.)
     pub fn new_recover(w: Workflow, wflog: WfLog) -> WfExecutor {
         let workflow_id = wflog.workflow_id;
-        let mut node_states = BTreeMap::new();
         let topo_visitor = Topo::new(&w.graph);
         let mut done = false;
-        let mut ready = Vec::new();
-        let mut node_outputs = BTreeMap::new();
         let mut nunfinished = 0;
+        let mut live_state = WfExecLiveState::new(w.launchers, wflog);
 
         for node in topo_visitor.iter(&w.graph) {
-            assert!(!node_states.contains_key(&node));
-            assert!(!node_outputs.contains_key(&node));
+            // TODO Figure out the best way to check this in recovery context.
+            // assert!(!node_states.contains_key(&node));
+            // assert!(!node_outputs.contains_key(&node));
 
-            let node_status = wflog.load_status_for_node(node.index() as u64);
+            let node_status = live_state.load_status_for_node(node);
             if let WfNodeLoadStatus::NeverStarted = node_status {
                 nunfinished += 1;
                 done = true;
@@ -223,13 +217,10 @@ impl WfExecutor {
                     // TODO-robustness check that parents have been satisfied
                     /* XXX This would be a good place for a debug log. */
                     nunfinished += 1;
-                    node_states.insert(node, WfNodeState::Ready);
-                    ready.push(node);
+                    live_state.node_make_ready(node);
                 }
                 WfNodeLoadStatus::Succeeded(o) => {
-                    /* XXX This would be a good place for a debug log. */
-                    node_states.insert(node, WfNodeState::Done);
-                    node_outputs.insert(node, Arc::clone(o));
+                    live_state.node_make_done(node, &Ok(Arc::clone(o)));
                 }
                 _ => {
                     // nunfinished += 1; // XXX re-insert when we remove todo!
@@ -238,14 +229,15 @@ impl WfExecutor {
             }
         }
 
-        let exec_state = if nunfinished == 0 {
-            assert_eq!(node_outputs.len(), w.graph.node_count());
-            assert_eq!(node_states.len(), w.graph.node_count());
-            assert!(ready.is_empty());
-            WfState::Done
-        } else {
-            WfState::Running
-        };
+        if nunfinished == 0 {
+            // TODO figure out how best to check this in recovery context.
+            // assert_eq!(node_outputs.len(), w.graph.node_count());
+            // assert_eq!(node_states.len(), w.graph.node_count());
+            // assert!(ready.is_empty());
+            live_state.mark_workflow_done();
+            // TODO do we need to send a message on "finish_tx"?  Obviously that
+            // won't really work here.
+        }
 
         /* See new(). */
         let (finish_tx, _) = broadcast::channel(1);
@@ -256,15 +248,7 @@ impl WfExecutor {
             root: w.root,
             workflow_id,
             finish_tx,
-            live_state: Arc::new(Mutex::new(WfExecLiveState {
-                launchers: w.launchers,
-                exec_state,
-                node_states,
-                node_tasks: BTreeMap::new(),
-                node_outputs,
-                ready,
-                wflog,
-            })),
+            live_state: Arc::new(Mutex::new(live_state)),
         }
     }
 
@@ -372,26 +356,13 @@ impl WfExecutor {
              */
             let message = rx.next().await.expect("broken tx");
             let node_id = message.node_id;
-
-            let (task, new_state) = {
+            let (task, node_state) = {
                 let mut live_state = self.live_state.lock().await;
-                let old_state = *live_state
-                    .node_states
-                    .get(&node_id)
-                    .expect("node finished that was not running");
-                let task = live_state
-                    .node_tasks
-                    .remove(&node_id)
-                    .expect("no task for completed node");
-
-                if old_state == WfNodeState::Done {
-                    let output = message.result.unwrap();
-                    live_state.node_outputs.insert(node_id, output);
-                } else {
-                    assert_eq!(old_state, WfNodeState::Failed);
-                }
-
-                (task, old_state)
+                live_state.node_make_done(node_id, &message.result);
+                (
+                    live_state.node_task_done(node_id),
+                    *live_state.node_states.get(&node_id).unwrap(),
+                )
             };
 
             /*
@@ -402,53 +373,14 @@ impl WfExecutor {
              */
             task.await.expect("node task failed unexpectedly");
 
-            if new_state == WfNodeState::Failed {
+            if node_state == WfNodeState::Failed {
                 todo!(); // TODO trigger unwind!
             }
 
-            assert_eq!(new_state, WfNodeState::Done);
-
-            {
-                let mut live_state = self.live_state.lock().await;
-
-                // TODO this condition needs work.  It doesn't account for
-                // failed nodes or unwinding or anything.
-                if self.graph.node_count() == live_state.node_outputs.len() {
-                    live_state.exec_state = WfState::Done;
-                    self.finish_tx
-                        .send(())
-                        .expect("failed to send finish message");
-                    break;
-                }
-
-                for depnode in self.graph.neighbors_directed(node_id, Outgoing)
-                {
-                    /*
-                     * Check whether all of this node's incoming edges are now
-                     * satisfied.
-                     */
-                    let mut okay = true;
-                    for upstream in
-                        self.graph.neighbors_directed(depnode, Incoming)
-                    {
-                        let node_state = live_state.node_states[&upstream];
-                        // XXX more general in the case of failure?
-                        if node_state != WfNodeState::Done {
-                            okay = false;
-                            break;
-                        }
-                    }
-
-                    if okay {
-                        live_state
-                            .node_states
-                            .insert(depnode, WfNodeState::Ready)
-                            .expect_none("node already had state");
-                        live_state.ready.push(depnode);
-                    }
-                }
+            assert_eq!(node_state, WfNodeState::Done);
+            if self.unblock_dependents(node_id).await {
+                break;
             }
-
             self.kick_off_ready(&tx).await;
         }
     }
@@ -488,9 +420,8 @@ impl WfExecutor {
                 action: wfaction,
             };
 
-            live_state.node_states.insert(node_id, WfNodeState::Starting);
             let task = tokio::spawn(WfExecutor::exec_node(task_params));
-            live_state.node_tasks.insert(node_id, task);
+            live_state.node_make_starting(node_id, task);
         }
     }
 
@@ -522,29 +453,61 @@ impl WfExecutor {
             .action
             .do_it(WfContext { ancestor_tree: task_params.ancestor_tree });
         let result = exec_future.await;
-        let (event_type, next_state, next_next) = if let Ok(ref output) = result
-        {
+        let (event_type, next_state) = if let Ok(ref output) = result {
             (
                 WfNodeEventType::Succeeded(Arc::clone(&output)),
                 WfNodeState::Finishing,
-                WfNodeState::Done,
             )
         } else {
-            (WfNodeEventType::Failed, WfNodeState::Failing, WfNodeState::Failed)
+            (WfNodeEventType::Failed, WfNodeState::Failing)
         };
 
         {
             let mut live_state = task_params.live_state.lock().await;
-            live_state.node_states.insert(node_id, next_state);
+            live_state.node_make_state(node_id, next_state);
             WfExecutor::record_now(&mut live_state.wflog, node_id, event_type)
                 .await;
-            live_state.node_states.insert(node_id, next_next);
         }
 
         task_params
             .done_tx
             .try_send(TaskCompletion { node_id, result })
             .expect("unexpected channel failure");
+    }
+
+    async fn unblock_dependents(&self, node_id: NodeIndex) -> bool {
+        let mut live_state = self.live_state.lock().await;
+
+        // TODO this condition needs work.  It doesn't account for
+        // failed nodes or unwinding or anything.
+        if self.graph.node_count() == live_state.node_outputs.len() {
+            live_state.mark_workflow_done();
+            self.finish_tx.send(()).expect("failed to send finish message");
+            return true;
+        }
+
+        for depnode in self.graph.neighbors_directed(node_id, Outgoing) {
+            /*
+             * Check whether all of this node's incoming edges are now
+             * satisfied.
+             */
+            let mut okay = true;
+            for upstream in self.graph.neighbors_directed(depnode, Incoming) {
+                let node_state =
+                    *live_state.node_states.get(&upstream).unwrap();
+                // XXX more general in the case of failure?
+                if node_state != WfNodeState::Done {
+                    okay = false;
+                    break;
+                }
+            }
+
+            if okay {
+                live_state.node_make_ready(depnode);
+            }
+        }
+
+        false
     }
 
     pub fn run(&self) -> impl Future<Output = ()> + '_ {
@@ -628,13 +591,93 @@ struct WfExecLiveState {
     wflog: WfLog,
 }
 
-// impl WfExecLiveState {
-//     // mark ready (set state = ready, append to ready queue)
-//     // set node state (only allowed for a handful of states)
-//     // set starting (sets state, consumes task handle)
-//     // set finishing (sets state, removes and returns task, records result)
-//     // propagate_ready
-//     pub fn new() -> WfExecLiveState {
-//
-//     }
-// }
+impl WfExecLiveState {
+    pub fn new(
+        launchers: BTreeMap<NodeIndex, Box<dyn WfAction>>,
+        wflog: WfLog,
+    ) -> WfExecLiveState {
+        WfExecLiveState {
+            launchers,
+            exec_state: WfState::Running,
+            node_states: BTreeMap::new(),
+            node_tasks: BTreeMap::new(),
+            node_outputs: BTreeMap::new(),
+            ready: Vec::new(),
+            wflog,
+        }
+    }
+
+    fn mark_workflow_done(&mut self) {
+        assert!(self.ready.is_empty());
+        assert_eq!(self.exec_state, WfState::Running);
+        self.exec_state = WfState::Done;
+    }
+
+    fn node_make_state(&mut self, node_id: NodeIndex, state: WfNodeState) {
+        let allowed = match state {
+            WfNodeState::Blocked => false,
+            WfNodeState::Ready => false,
+            WfNodeState::Starting => true,
+            WfNodeState::Running => true,
+            WfNodeState::Finishing => true,
+            WfNodeState::Done => false,
+            WfNodeState::Failing => true,
+            WfNodeState::Failed => false,
+            WfNodeState::StartingCancel => false,
+            WfNodeState::Cancelling => false,
+            WfNodeState::FinishingCancel => false,
+            WfNodeState::Cancelled => false,
+        };
+
+        if !allowed {
+            panic!("cannot use node_make_state() for state: {:?}", state);
+        }
+
+        self.node_states.insert(node_id, state).unwrap();
+    }
+
+    fn node_make_ready(&mut self, node_id: NodeIndex) {
+        self.node_states
+            .insert(node_id, WfNodeState::Ready)
+            .expect_none("readying node that had a state");
+        self.ready.push(node_id);
+    }
+
+    fn node_make_done(&mut self, node_id: NodeIndex, output: &WfResult) {
+        /*
+         * XXX This panic ought to be a graceful error during recovery because
+         * it reflects an invalid log.
+         */
+        /* TODO This would be a good place for a debug log. */
+        if let Ok(output) = output {
+            self.node_outputs
+                .insert(node_id, Arc::clone(output))
+                .expect_none("node already emitted output");
+            self.node_states.insert(node_id, WfNodeState::Done);
+        } else {
+            self.node_states.insert(node_id, WfNodeState::Failed);
+        }
+    }
+
+    fn node_make_starting(&mut self, node_id: NodeIndex, task: JoinHandle<()>) {
+        self.node_states
+            .insert(node_id, WfNodeState::Starting)
+            .expect("started node that had no previous state");
+        self.node_tasks.insert(node_id, task);
+    }
+
+    fn node_task_done(&mut self, node_id: NodeIndex) -> JoinHandle<()> {
+        let state = *self
+            .node_states
+            .get(&node_id)
+            .expect("processing task completion for task with no state");
+        assert!(state == WfNodeState::Done || state == WfNodeState::Failed);
+        self.node_tasks
+            .remove(&node_id)
+            .expect("processing task completion with no task present")
+    }
+
+    fn load_status_for_node(&self, node_id: NodeIndex) -> &WfNodeLoadStatus {
+        self.wflog.load_status_for_node(node_id.index() as u64)
+    }
+}
