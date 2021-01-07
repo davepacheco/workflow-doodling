@@ -283,9 +283,6 @@ impl WfExecutor {
             return;
         }
 
-        let name = self.node_names[&node].to_string();
-        let node_state =
-            live_state.node_states.get(&node).unwrap_or(&WfNodeState::Blocked);
         /*
          * If we're in this function, it's because we're looking at the ancestor
          * of a node that's currently "Running".  All such ancestors must be
@@ -295,9 +292,9 @@ impl WfExecutor {
          * finished cancelling descendants, which would include the current
          * node.
          */
-        assert_eq!(*node_state, WfNodeState::Done);
-        let output = &live_state.node_outputs[&node];
-        tree.insert(name, Arc::clone(output));
+        let name = self.node_names[&node].to_string();
+        let output = live_state.node_output(node);
+        tree.insert(name, output);
         self.make_ancestor_tree(tree, live_state, node);
     }
 
@@ -446,7 +443,7 @@ impl WfExecutor {
                 WfNodeEventType::Started,
             )
             .await;
-            live_state.node_states.insert(node_id, WfNodeState::Running);
+            live_state.node_make_state(node_id, WfNodeState::Running);
         }
 
         let exec_future = task_params
@@ -675,6 +672,17 @@ impl WfExecLiveState {
         self.node_tasks
             .remove(&node_id)
             .expect("processing task completion with no task present")
+    }
+
+    fn node_output(&self, node_id: NodeIndex) -> WfOutput {
+        let node_state =
+            self.node_states.get(&node_id).expect("node has not finished");
+        assert_eq!(*node_state, WfNodeState::Done);
+        let output = self
+            .node_outputs
+            .get(&node_id)
+            .expect("node in state \"done\" with no output");
+        Arc::clone(&output)
     }
 
     fn load_status_for_node(&self, node_id: NodeIndex) -> &WfNodeLoadStatus {
