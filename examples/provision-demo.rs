@@ -92,6 +92,7 @@ async fn demo_prov_server_alloc(wfctx: WfContext) -> WfFuncResult {
     let wf = w.build();
 
     let e = wfctx.child_workflow(wf).await;
+    e.run().await;
     let server_allocated: Arc<ServerAllocResult> =
         e.lookup_output("server_reserve").await?;
     Ok(Arc::new(server_allocated.server_id))
@@ -159,13 +160,17 @@ async fn demo_prov_print(wfctx: WfContext) -> WfFuncResult {
 async fn main() {
     let mut stderr = io::stderr();
     let w = make_provision_workflow();
+    eprintln!("*** workflow definition ***");
     eprintln!("{:?}", w);
-    let e = WfExecutor::new(w);
 
-    eprintln!("initial state");
-    e.print_status(&mut stderr).await.unwrap();
+    eprintln!("*** initial state ***");
+    let e = WfExecutor::new(w);
+    e.print_status(&mut stderr, 0).await.unwrap();
+
     eprintln!("*** running workflow ***");
     e.run().await;
-    eprintln!("final state");
-    e.print_status(&mut stderr).await.unwrap();
+    eprintln!("*** finished workflow ***");
+
+    eprintln!("*** final state ***");
+    e.print_status(&mut stderr, 0).await.unwrap();
 }

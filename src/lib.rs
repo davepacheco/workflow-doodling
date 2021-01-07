@@ -43,6 +43,7 @@
  *   with this in the node that's part of the parent graph.  (That's kind of
  *   what you want anyway: callers will already be taking parameters out of the
  *   parent state and making them part of the child state, most likely.)
+ * - summary of current state a la Manta resharder
  *
  * Remaining things to de-risk:
  *
@@ -56,7 +57,6 @@
  *   carry that out?  And how do we determine whether errors within subworkflows
  *   demand that the parent workflow also be reversed?
  * - bells and whistles:
- *   - summary of current state a la Manta resharder
  *   - pausing
  *   - concurrency limit
  *   - canarying
@@ -310,14 +310,19 @@
  *   uses recover_workflow_log() to compute the load state of each node, then
  *   uses this to restore the in-memory execution state.
  *   - XXX working here: I've written some recovery code but it's a little hard
- *     to test.  The next step was to break up the WfExecutor from its Future.
- *     I've written this code and tested it with the demo.
- *     The next step might be to add pause_at() so that I can pause execution at
- *     some specific point and use snapshot() to get the log at that point, then
- *     test recovery frmo there.
- *     There's also a ton of cleanup to do here.
+ *     to test.  I did some refactoring, lots of cleanup, and other foundation
+ *     for testing this: like print_status().
+ *     The next step is to figure out how to actually test recovery.  One idea
+ *     is to add pause_at() so that I can pause execution at some specific
+ *     point, create and use snapshot() to get the log at that point, then test
+ *     recovery from that log.
+ *     This isn't bad, but it will never exercise a case where the log contains
+ *     a start record for an action but no "done" record.
+ *     We might want another mode where we can just extract partial leading
+ *     subsequences of a WfLog.
+ * - There's also a ton of cleanup to do here.
  * - Add a few demos to convince myself this all works reasonably correctly.
- * - Implement unwinding
+ * - Implement unwinding.
  */
 
 #![feature(type_name_of_val)]
@@ -340,6 +345,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+pub use wf_exec::WfContext;
 pub use wf_exec::WfExecutor;
 // TODO Probably don't need to be public, actually
 pub use wf_log::recover_workflow_log;
@@ -386,72 +392,6 @@ pub trait WfAction: Debug + Send + Sync {
      * sharing state across actions within a workflow.
      */
     async fn do_it(&self, wfctx: WfContext) -> WfResult;
-}
-
-/**
- * Action's handle to the workflow subsystem
- *
- * Any APIs that are useful for actions should hang off this object.  It should
- * have enough state to know which node is invoking the API.
- */
-pub struct WfContext {
-    ancestor_tree: BTreeMap<String, WfOutput>,
-}
-
-impl WfContext {
-    /**
-     * Retrieves a piece of data stored by a previous (ancestor) node in the
-     * current workflow.  The data is identified by `name`.
-     *
-     * Data is returned as `Arc<T>` (as opposed to `T`) because all descendant
-     * nodes have access to the data stored by a node (so there may be many
-     * references).  Once stored, a given piece of data is immutable.
-     *
-     *
-     * # Panics
-     *
-     * This function panics if there was no data previously stored with name
-     * `name` or if the type of that data was not `T`.  (Data is stored as
-     * `Arc<dyn Any>` and downcast to `T` here.)  The assumption here is actions
-     * within a workflow are tightly coupled, so the caller knows exactly what
-     * the previous action stored.  We would enforce this at compile time if we
-     * could.
-     */
-    pub fn lookup<T: Send + Sync + 'static>(
-        &self,
-        name: &str,
-    ) -> Result<Arc<T>, WfError> {
-        let item = self
-            .ancestor_tree
-            .get(name)
-            .expect(&format!("no ancestor called \"{}\"", name));
-        let specific_item = Arc::clone(item)
-            .downcast::<T>()
-            .expect(&format!("ancestor \"{}\" produced unexpected type", name));
-        Ok(specific_item)
-    }
-
-    /**
-     * Execute a new workflow `wf` and wait for it to complete.  `wf` is
-     * considered a "child" workflow of the current workflow.
-     * TODO Is there some way to prevent people from instantiating their own
-     * WfExecutor by mistake instead?  Even better: if they do that, can we
-     * detect that they're part of a workflow already somehow and make the new
-     * one a child workflow?
-     */
-    pub async fn child_workflow(&self, wf: Workflow) -> WfExecutor {
-        /*
-         * TODO Really we want this to reach into the parent WfExecutor and make
-         * a record about this new execution.  This is mostly for observability
-         * and control: if someone asks for the status of the parent workflow,
-         * we'd like to give details on this child workflow.  Similarly if they
-         * pause the parent, that should pause the child one.  How can we do
-         * this?
-         */
-        let e = WfExecutor::new(wf);
-        e.run().await;
-        e
-    }
 }
 
 /**

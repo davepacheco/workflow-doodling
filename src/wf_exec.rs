@@ -3,7 +3,6 @@
 use crate::wf_log::WfNodeEventType;
 use crate::wf_log::WfNodeLoadStatus;
 use crate::WfAction;
-use crate::WfContext;
 use crate::WfError;
 use crate::WfId;
 use crate::WfLog;
@@ -13,7 +12,9 @@ use crate::Workflow;
 use anyhow::anyhow;
 use core::future::Future;
 use futures::channel::mpsc;
+use futures::future::BoxFuture;
 use futures::lock::Mutex;
+use futures::FutureExt;
 use futures::StreamExt;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::Topo;
@@ -448,9 +449,11 @@ impl WfExecutor {
             live_state.node_make_state(node_id, WfNodeState::Running);
         }
 
-        let exec_future = task_params
-            .action
-            .do_it(WfContext { ancestor_tree: task_params.ancestor_tree });
+        let exec_future = task_params.action.do_it(WfContext {
+            ancestor_tree: task_params.ancestor_tree,
+            node_id,
+            live_state: Arc::clone(&task_params.live_state),
+        });
         let result = exec_future.await;
         let (event_type, next_state) = if let Ok(ref output) = result {
             (
@@ -549,10 +552,15 @@ impl WfExecutor {
     }
 
     // TODO-liveness does this writer need to be async?
-    pub async fn print_status(
-        &self,
-        out: &mut dyn io::Write,
-    ) -> io::Result<()> {
+    pub fn print_status<'a, 'b, 'c>(
+        &'a self,
+        out: &'b mut (dyn io::Write + Send),
+        indent_level: usize,
+    ) -> BoxFuture<'c, io::Result<()>>
+    where
+        'a: 'c,
+        'b: 'c,
+    {
         /* TODO-cleanup There must be a better way to do this. */
         let mut max_depth_of_node: BTreeMap<NodeIndex, usize> = BTreeMap::new();
         max_depth_of_node.insert(self.start_node, 0);
@@ -588,27 +596,64 @@ impl WfExecutor {
             nodes_at_depth.entry(depth).or_insert(Vec::new()).push(node);
         }
 
-        let live_state = self.live_state.lock().await;
+        let big_indent = indent_level * 16;
 
-        write!(out, "workflow execution: {}\n", self.workflow_id)?;
-        for (d, nodes) in nodes_at_depth {
-            write!(out, "  stage {:>2}: ", d)?;
-            if nodes.len() == 1 {
-                let node = nodes[0];
-                let node_name = &self.node_names[&node];
-                let node_state = live_state.node_state(node);
-                write!(out, "{}: {}\n", node_state, node_name)?;
-            } else {
-                write!(out, "(actions in parallel)\n")?;
-                for node in nodes {
+        async move {
+            let live_state = self.live_state.lock().await;
+
+            write!(
+                out,
+                "{:width$}+ workflow execution: {}\n",
+                "",
+                self.workflow_id,
+                width = big_indent
+            )?;
+            for (d, nodes) in nodes_at_depth {
+                write!(
+                    out,
+                    "{:width$}+-- stage {:>2}: ",
+                    "",
+                    d,
+                    width = big_indent
+                )?;
+                if nodes.len() == 1 {
+                    let node = nodes[0];
                     let node_name = &self.node_names[&node];
                     let node_state = live_state.node_state(node);
-                    write!(out, "  {:>12}{}: {}\n", "", node_state, node_name)?;
+                    write!(out, "{}: {}\n", node_state, node_name)?;
+                } else {
+                    write!(out, "+ (actions in parallel)\n")?;
+                    for node in nodes {
+                        let node_name = &self.node_names[&node];
+                        let node_state = live_state.node_state(node);
+                        let child_workflows =
+                            live_state.child_workflows.get(&node);
+                        let subworkflow_char =
+                            if child_workflows.is_some() { '+' } else { '-' };
+
+                        write!(
+                            out,
+                            "{:width$}{:>14}+-{} {}: {}\n",
+                            "",
+                            "",
+                            subworkflow_char,
+                            node_state,
+                            node_name,
+                            width = big_indent
+                        )?;
+
+                        if let Some(workflows) = child_workflows {
+                            for c in workflows {
+                                c.print_status(out, indent_level + 1).await?;
+                            }
+                        }
+                    }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        }
+        .boxed()
     }
 }
 
@@ -646,6 +691,9 @@ struct WfExecLiveState {
     /** Outputs saved by completed actions. */
     // TODO may as well store errors too
     node_outputs: BTreeMap<NodeIndex, WfOutput>,
+
+    /** Child workflows created by a node (for status and control) */
+    child_workflows: BTreeMap<NodeIndex, Vec<Arc<WfExecutor>>>,
 
     /** Persistent state */
     wflog: WfLog,
@@ -828,6 +876,7 @@ impl WfRecovery {
             node_states: self.node_states,
             node_outputs: self.node_outputs,
             node_tasks: BTreeMap::new(),
+            child_workflows: BTreeMap::new(),
         }
     }
 }
@@ -907,5 +956,83 @@ fn recovery_validate_parent(
             WfNodeState::Failed => true,
             _ => false,
         },
+    }
+}
+
+/**
+ * Action's handle to the workflow subsystem
+ *
+ * Any APIs that are useful for actions should hang off this object.  It should
+ * have enough state to know which node is invoking the API.
+ */
+pub struct WfContext {
+    ancestor_tree: BTreeMap<String, WfOutput>,
+    node_id: NodeIndex,
+    live_state: Arc<Mutex<WfExecLiveState>>,
+}
+
+impl WfContext {
+    /**
+     * Retrieves a piece of data stored by a previous (ancestor) node in the
+     * current workflow.  The data is identified by `name`.
+     *
+     * Data is returned as `Arc<T>` (as opposed to `T`) because all descendant
+     * nodes have access to the data stored by a node (so there may be many
+     * references).  Once stored, a given piece of data is immutable.
+     *
+     *
+     * # Panics
+     *
+     * This function panics if there was no data previously stored with name
+     * `name` or if the type of that data was not `T`.  (Data is stored as
+     * `Arc<dyn Any>` and downcast to `T` here.)  The assumption here is actions
+     * within a workflow are tightly coupled, so the caller knows exactly what
+     * the previous action stored.  We would enforce this at compile time if we
+     * could.
+     */
+    pub fn lookup<T: Send + Sync + 'static>(
+        &self,
+        name: &str,
+    ) -> Result<Arc<T>, WfError> {
+        let item = self
+            .ancestor_tree
+            .get(name)
+            .expect(&format!("no ancestor called \"{}\"", name));
+        let specific_item = Arc::clone(item)
+            .downcast::<T>()
+            .expect(&format!("ancestor \"{}\" produced unexpected type", name));
+        Ok(specific_item)
+    }
+
+    /**
+     * Execute a new workflow `wf` and wait for it to complete.  `wf` is
+     * considered a "child" workflow of the current workflow.
+     * TODO Is there some way to prevent people from instantiating their own
+     * WfExecutor by mistake instead?  Even better: if they do that, can we
+     * detect that they're part of a workflow already somehow and make the new
+     * one a child workflow?
+     * TODO Would this be better done by having a WfActionWorkflow that executed
+     * a workflow as an action?  This way we would know when the Workflow was
+     * constructed what the whole graph looks like, instead of only knowing
+     * about child workflows once we start executing the node that creates them.
+     */
+    pub async fn child_workflow(&self, wf: Workflow) -> Arc<WfExecutor> {
+        /*
+         * TODO Really we want this to reach into the parent WfExecutor and make
+         * a record about this new execution.  This is mostly for observability
+         * and control: if someone asks for the status of the parent workflow,
+         * we'd like to give details on this child workflow.  Similarly if they
+         * pause the parent, that should pause the child one.
+         */
+        let e = Arc::new(WfExecutor::new(wf));
+        /* TODO-correctness Prove the lock ordering is okay here .*/
+        self.live_state
+            .lock()
+            .await
+            .child_workflows
+            .entry(self.node_id)
+            .or_insert(Vec::new())
+            .push(Arc::clone(&e));
+        e
     }
 }
