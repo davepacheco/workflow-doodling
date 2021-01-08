@@ -93,8 +93,9 @@ async fn demo_prov_server_alloc(wfctx: WfContext) -> WfFuncResult {
 
     let e = wfctx.child_workflow(wf).await;
     e.run().await;
+    let result = e.result();
     let server_allocated: Arc<ServerAllocResult> =
-        e.lookup_output("server_reserve").await?;
+        result.lookup_output("server_reserve")?;
     Ok(Arc::new(server_allocated.server_id))
 }
 

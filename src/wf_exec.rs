@@ -507,48 +507,35 @@ impl WfExecutor {
         }
     }
 
-    // TODO better than this would be if the result of executing the workflow is
-    // a WfSummary struct that provides access to information about each node
-    // (timing, output, error).  This struct would be immutable.  Then this
-    // wouldn't need to be async because we wouldn't need to take a lock.
-    pub async fn lookup_output<T: Send + Sync + 'static>(
-        &self,
-        name: &str,
-    ) -> Result<Arc<T>, WfError> {
-        let live_state = self.live_state.lock().await;
-        /* TODO This is awful */
-        for node_id in live_state.node_outputs.keys() {
-            let node_name = self.node_names.get(node_id);
-            if node_name.is_none() {
-                assert!(
-                    *node_id == self.start_node || *node_id == self.end_node
-                );
+    pub fn result(&self) -> WfExecResult {
+        /*
+         * TODO-cleanup is there a way to make this safer?  If we could know
+         * that there were no other references to the live_state (which should
+         * be true, if we're done), then we could consume it, as well as "self",
+         * and avoid several copies below.
+         */
+        let live_state = self
+            .live_state
+            .try_lock()
+            .expect("attempted to get result while workflow still running?");
+        assert_eq!(live_state.exec_state, WfState::Done);
+
+        let mut node_results = BTreeMap::new();
+        for (node_id, output) in &live_state.node_outputs {
+            if *node_id == self.start_node || *node_id == self.end_node {
                 continue;
             }
 
-            if node_name.unwrap() == name {
-                let node_state = live_state
-                    .node_states
-                    .get(&node_id)
-                    .unwrap_or(&WfNodeState::Blocked);
-                if *node_state != WfNodeState::Done {
-                    return Err(anyhow!(
-                        "node with name \"{}\" did not finish \
-                        or did not finish successfully",
-                        name,
-                    ));
-                }
-                let item = live_state.node_outputs.get(&node_id).unwrap();
-                let specific_item =
-                    Arc::clone(item).downcast::<T>().expect(&format!(
-                        "node with name \"{}\" produced unexpected type",
-                        name
-                    ));
-                return Ok(specific_item);
-            }
+            let node_name = &self.node_names[node_id];
+            node_results.insert(node_name.clone(), Ok(Arc::clone(output)));
         }
 
-        panic!("node with name \"{}\" is not part of the workflow", name);
+        WfExecResult {
+            workflow_id: self.workflow_id,
+            wflog: live_state.wflog.clone(),
+            node_results,
+            succeeded: true,
+        }
     }
 
     // TODO-liveness does this writer need to be async?
@@ -878,6 +865,45 @@ impl WfRecovery {
             node_tasks: BTreeMap::new(),
             child_workflows: BTreeMap::new(),
         }
+    }
+}
+
+/**
+ * Summarizes the final state of a workflow execution.
+ */
+pub struct WfExecResult {
+    pub workflow_id: WfId,
+    pub wflog: WfLog,
+    pub node_results: BTreeMap<String, WfResult>,
+    succeeded: bool,
+}
+
+impl WfExecResult {
+    pub fn lookup_output<T: Send + Sync + 'static>(
+        &self,
+        name: &str,
+    ) -> Result<Arc<T>, WfError> {
+        if !self.succeeded {
+            return Err(anyhow!(
+                "fetch output \"{}\" from workflow execution \
+                \"{}\": workflow did not complete successfully",
+                name,
+                self.workflow_id
+            ));
+        }
+
+        let result = self.node_results.get(name).expect(&format!(
+            "node with name \"{}\" is not part of this workflow",
+            name
+        ));
+        let item = result.as_ref().expect(&format!(
+            "node with name \"{}\" failed and did not produce an output",
+            name
+        ));
+        Ok(Arc::clone(&item).downcast::<T>().expect(&format!(
+            "requested wrong type for output of node with name \"{}\"",
+            name
+        )))
     }
 }
 
