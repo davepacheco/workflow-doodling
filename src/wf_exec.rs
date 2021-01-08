@@ -121,6 +121,8 @@ struct TaskParams {
     ancestor_tree: BTreeMap<String, WfOutput>,
     /** The action itself that we're executing. */
     action: Arc<dyn WfAction>,
+    /** Skip logging the "start" record (if this is a restart) */
+    skip_log_start: bool,
 }
 
 /**
@@ -226,8 +228,7 @@ impl WfExecutor {
                     }
                 }
                 WfNodeLoadStatus::Started => {
-                    // TODO-correctness should not log another "start" record
-                    recovery.node_ready(node_id);
+                    recovery.node_restart(node_id);
                 }
                 WfNodeLoadStatus::Succeeded(o) => {
                     recovery.node_succeeded(node_id, Arc::clone(o));
@@ -401,7 +402,16 @@ impl WfExecutor {
         live_state.ready = Vec::new();
 
         for node_id in ready_to_run {
-            assert_eq!(live_state.node_states[&node_id], WfNodeState::Ready);
+            let node_state = live_state.node_states[&node_id];
+            /*
+             * This is a bit kludgy, but during recovery we use the state
+             * "Starting" here to indicate that the node has already been
+             * started.  See exec_node().
+             */
+            assert!(
+                node_state == WfNodeState::Ready
+                    || node_state == WfNodeState::Starting
+            );
 
             let wfaction = live_state
                 .launchers
@@ -418,6 +428,7 @@ impl WfExecutor {
                 done_tx: tx.clone(),
                 ancestor_tree,
                 action: wfaction,
+                skip_log_start: node_state == WfNodeState::Starting,
             };
 
             let task = tokio::spawn(WfExecutor::exec_node(task_params));
@@ -435,17 +446,19 @@ impl WfExecutor {
             /*
              * TODO-liveness We don't want to hold this lock across a call
              * to the database.  It's fair to say that if the database
-             * hangs, the saga's corked anyway, but we shoudl at least be
+             * hangs, the saga's corked anyway, but we should at least be
              * able to view its state, and we can't do that with this
              * design.
              */
             let mut live_state = task_params.live_state.lock().await;
-            WfExecutor::record_now(
-                &mut live_state.wflog,
-                node_id,
-                WfNodeEventType::Started,
-            )
-            .await;
+            if !task_params.skip_log_start {
+                WfExecutor::record_now(
+                    &mut live_state.wflog,
+                    node_id,
+                    WfNodeEventType::Started,
+                )
+                .await;
+            }
             live_state.node_make_state(node_id, WfNodeState::Running);
         }
 
@@ -812,6 +825,11 @@ impl WfRecovery {
 
     pub fn node_ready(&mut self, node_id: NodeIndex) {
         self.node_recover_state(node_id, WfNodeState::Ready);
+        self.ready.push(node_id);
+    }
+
+    pub fn node_restart(&mut self, node_id: NodeIndex) {
+        self.node_recover_state(node_id, WfNodeState::Starting);
         self.ready.push(node_id);
     }
 

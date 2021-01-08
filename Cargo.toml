@@ -5,7 +5,7 @@ authors = ["David Pacheco <dap@oxidecomputer.com>"]
 edition = "2018"
 
 [profile.dev]
-panic = "abort"
+#panic = "abort"
 
 [dependencies]
 anyhow = "1.0.34"

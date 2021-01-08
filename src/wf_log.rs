@@ -108,7 +108,9 @@ impl WfNodeLoadStatus {
                 WfNodeEventType::CancelFinished,
             ) => Ok(WfNodeLoadStatus::CancelFinished),
             _ => Err(anyhow!(
-                "workflow node with status \"{}\": event \"{}\" is illegal"
+                "workflow node with status \"{:?}\": event \"{}\" is illegal",
+                self,
+                event_type
             )),
         }
     }
@@ -186,7 +188,9 @@ impl WfLog {
             creator: self.creator.clone(),
         };
 
-        let result = self.record(event).expect("illegal event");
+        let result = self
+            .record(event)
+            .expect(&format!("illegal event for node {}", node_id));
 
         /*
          * Although this implementation is synchronous, we want callers to

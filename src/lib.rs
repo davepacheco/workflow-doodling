@@ -320,6 +320,8 @@
  *     a start record for an action but no "done" record.
  *     We might want another mode where we can just extract partial leading
  *     subsequences of a WfLog.
+ * - TODO does recovery "just work" correctly with a subworkflow involved?  I
+ *   think some more work must be needed here.
  * - There's also a ton of cleanup to do here.
  * - Add a few demos to convince myself this all works reasonably correctly.
  * - Implement unwinding.
