@@ -1,0 +1,200 @@
+Summary of major open questions
+----------------------------------------
+
+- Failover!  See notes below.
+
+
+Major areas to derisk
+----------------------------------------
+
+- Reversibility: how do we allow consumers to express that some or all of
+  these actions are reversible and then implement that such that if a
+  Workflow step fails in a way that demands reversal of the workflow, then we
+  carry that out?  And how do we determine whether errors within subworkflows
+  demand that the parent workflow also be reversed?
+
+TODO
+----------------------------------------
+
+- Implement unwinding
+- Open questions above
+- Major areas to derisk above
+- There's also a ton of cleanup to do here.
+- Subworkflows and recovery: this might "just work" if workflow actions that
+  create subworkflows were idempotent.  But I don't think they are today.
+  Maybe if we first-class `WfActionWorkflow`, the framework can ensure that
+  this is done idempotently.
+- Features:
+  - pausing, "breakpoints", step through, etc. (thought: create a common
+    "wait" function.  Arguments describe the event (e.g., starting action for
+    node X).  In pause mode, it checks a condition and decides whether to
+    wait.  In "step" mode, it decrements a semaphore.  In normal mode, it
+    does nothing.)
+  - concurrency limit
+  - canarying
+  - blast radius?
+  - policy around what to do on failure (stop, rewind)
+  - Allow workflow execution to consume parameters
+- It should be easier to define functions that _don't_ record any persistent
+  state (to avoid having to assign a name and to avoid the boilerplate of
+  Ok(Arc::new(()))
+- Revisit static typing in the construction and execution of the graph?
+  - See notes from Cliff below.
+  - Probably: this isn't so much input/output for each function, but a set of
+    state depended-on by the function and a set of state produced by the
+    function.  (The difference is that the input of one does not need to
+    match the output of the previous one, like I was previously assuming).
+  - starting to see how a macro could allow you to say field X has type Y and
+    insert into the beginning of your function the appropriate calls to
+    lookup(), though that still wouldn't be statically type-checked.
+  - Would one piece of this be to use macros on the action functions that
+    also generate input and output types specific to that function?  Would
+    they also need to generate glue code from previous and subsequent nodes?
+  - I think we want the Graph data structure to erase the specific
+    input/output types as we do today.  But maybe when it's still in the
+    builder stage, we keep track of these types so that we can fail at
+    compile time when constructing an invalid graph.
+
+What exists so far
+-------------------
+
+The current status is that we have (NOTE: proof-of-concept testing so far,
+nothing close to exhaustive testing):
+
+- basic types: WfError, WfResult
+- WfAction, a trait representing the actions taken for nodes in the graph
+- WfActionFunc, which makes it easy to create WfActions from functions
+- WfBuilder, an interface for constructing a workflow graph pretty much by
+  hand
+- basic execution via WfExecutor: an executor that walks the graph and
+  executes exactly the steps that it's allowed to execute with maximum
+  parallelism
+- shared data between actions
+- composeability: inserting an entire workflow into a workflow node.  A big
+  challenge here is that the state objects will differ.  Callers have to deal
+  with this in the node that's part of the parent graph.  (That's kind of
+  what you want anyway: callers will already be taking parameters out of the
+  parent state and making them part of the child state, most likely.)
+- summary of current state a la Manta resharder
+- basic persistence (in the from of the log)
+- recovery from partial logs
+
+================================================================
+[2021-01-08] Notes from discussions with Cliff
+
+This section includes notes from talking with Cliff about the design of the executor and about sagas in general.
+
+--------------------------------
+
+Use channels to link nodes.  Instead of polling on the same futures all the time, we could use channels to communicate when things were done.  So you could imagine that each Node in the graph has a Future that basically does:
+
+    wait_on_my_channel().await
+    log_start().await
+    do_the_thing().await
+    log_done().await
+    send_on_main_channel(my_id).await
+
+My executor then spawns tasks to run this, handing each one the receive side of a task-specific channel that will be used to wake it up as well as the send side of a MPSC channel that we use to be notified when it's done.  Then we're mostly polling on that MPSC channel.
+
+futures: mpsc, oneshot
+async-channel: https://crates.io/crates/async-channel
+tokio: broadcast channel
+
+This makes sense.  It's not yet totally clear to me how we manage cancellation in this case, but I guess we create another future for this node that does something similar to the above.
+
+(The bulk of the orchestration is now happening by some other Executor)
+
+--------------------------------
+
+Regarding static typing for workflow nodes: see
+"specs", then "legion", then "bevy"
+https://kyren.github.io/2018/09/14/rustconf-talk.html
+https://specs.amethyst.rs/docs/tutorials/04_resources.html
+
+
+================================================================
+[2021-01-08] Past design decisions
+
+The rest of the notes in this file are summaries or copies of content that is/was pretty stream-of-consciousness in src/lib.rs.  Much of it is now more historical than currently useful, but may be useful again if we need to revisit some of the key design decisions.  The raw notes are still in the repo history.
+
+
+Top-level subparts of the problem
+----------------------------------------
+
+- What's the syntax for constructing the graph?  Can graphs be modified while
+  they're being executed?  (If not, the syntax for constructing them can
+  probably be made a lot cleaner.  But some workflows may require this, as
+  when step N is used to stamp out a bunch of different instances of step N +
+  1.)
+
+  To keep things simple for now, we're going to make the construction totally
+  explicit.
+
+- How is data shared between different actions in the graph?  Ideally, this
+  would be statically type-checked, so that you could not add a node B to the
+  graph that uses data that wasn't provided by some ancestor of B in the
+  graph.  It's not clear how to express this in Rust without a lot of
+  boilerplate or macros.
+
+- How do execution parameters like canarying, limited concurrency, and
+  limiting blast radius fit in?
+
+- Persistence: what state do we persist and how?  More on this below.
+
+
+Summary of issues I spent a lot of time on so far
+--------------------------------------------------
+
+I had a lot more stream-of-consciousness notes on a lot of this in src/lib.rs that I'm removing on 2021-01-08.
+
+- Shared state and persistence.  Is there one shared-state object for the whole workflow?  Subworkflows require translation back and forth, and it means state is mutable.  That's not great.  And how do we persist it?  Instead, went with saying each action can produce exactly one value (arbitrary type), stored as Arc<dyn Any>.  Sad that it's dynamically-typed, but on the plus side: it's immutable once emitted by the action, actions never explicitly store state (and so don't decide when, and so can't get that wrong), we can put that output into the saga log, and it's easy to share to dependent nodes since it's immutable.
+- How can we make construction of the graph statically type-checked, so that if an action depends on data supplied by a previous node, then it won't compile if you don't put that node ahead of it in the graph.  I gave up trying to do this and instead went with a dynamically-typed form of getting data from ancestor nodes (see above).  I still hope we can revisit this later once we have the rest of the SEC built.
+- Idempotence of actions: an obvious implementation for a lot of things is to generate a uuid and create an object with that uuid.  That's not idempotent!  How can we avoid creating a second one (and leaking it) if we crash immediately before recording the first one?  Lots of approaches here, but none very satisfying.  On the plus side, this seems fairly testable -- we can run a workflow, simulate a crash immediately before state is saved for an action, rerun the action, and see if it made changes to the (simulated?) database.
+- Failover.  How do avoid two SECs going split-brain?  There are a couple of basic approaches:
+  - make sure it can't happen by requiring that an SEC _explicitly_ hand off control of a saga in all circumstances.  This makes some circumstances much more annoying to recover (e.g., extended offline due to a panic or partition), but maybe isn't a big deal in practice.
+  - make sure it can't happen by designing the log + SEC algorithm in such a way that two SECs cannot write log entries in a case where one was unaware of what the other was doing. (e.g., OCC generation number on the saga itself).  However, with this approach, I don't think there's a way to avoid having potentially executed an action twice (and possibly twice concurrently!) in the split-brain scenario.
+  - adjust the requirements slightly so that actions are required to cope with being executed twice in parallel, and define that the framework executes compensation actions N-1 times or else a separate "resolution" action or something like that.
+
+
+Notes on distributed sagas implementation
+--------------------------------------------------
+
+See https://www.youtube.com/watch?v=0UTOLRTwOX0, starting around T=23m:
+
+- distributed saga log -- only thing that's persisted
+  - "start saga" message includes initial parameter
+  - "start saga" node marked complete
+  - "start <node>" written to log and acked before executing request
+  - "end <node>" written to log _with result of request_ logged and acked
+  - write "end saga" message
+- failure @ ~27m: this is clear failure of a request, which triggers a
+  rollback.  write "abort <node>" message, etc.
+  - when rolling back node: check log for entries for a node.  If none,
+    do nothing and move on.  If there's an abort message, do nothing and move
+    on.  If completed successfully, log "start cancel <node>", issue
+    compensating request, log "end cancel <node>".  If there's a "start" and
+    that's all, then _send it again_, get a response (and log it), _then_
+    compensate it (logging that).  (I'm not sure why you can't _just_ cancel
+    it.  Asked at 35m45s or so.) OOHH! This guarantees that there's always
+    _something_ to cancel -- you never have to cancel something you've never
+    heard of.  (That means commutativity isn't quite the right name for the
+    property these compensating requests have to have.  What you need is that
+    if you've issued the compensating one and subsequently the original
+    request is replayed, the result should be that the compensating action
+    has happened.)
+
+Open items from distributed saga log:
+- how do you ensure that two executors aren't working concurrently on the
+  same saga? (as described, there's a race in checking log and taking action,
+  I think).  Maybe we can deal with this by always updating a workflow
+  "generation" record every time we add an entry to the log?
+- At 30m30s or so, she sort of talks about SEC failure or distribution.
+  Sounds like she thinks it all "just works"?
+- how do you identify when the coordinator fails and resume elsewhere?
+  (discussed around 40m and several more questions about it, but basically
+  punted)
+- how do any nodes in the graph access output from previous nodes?  from log
+  messages?  does that mean we reconstruct this shared state from the log?
+
+NOTE: this has implication for the shared in-memory state between nodes.  It
+needs to be reconstituted from the log.
