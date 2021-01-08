@@ -138,10 +138,14 @@ pub struct WfNodeEvent {
 }
 
 impl fmt::Debug for WfNodeEvent {
+    /*
+     * TODO We'd save a lot of horizontal space (9 columns) by dropping
+     * precision after milliseconds and the time zone.
+     */
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} {} {:>3} {}",
+            "{} {} N{:0>3} {}",
             self.event_time.to_rfc3339(),
             self.creator,
             self.node_id,
@@ -223,8 +227,8 @@ impl fmt::Debug for WfLog {
         write!(f, "events ({} total):\n", self.events.len())?;
         write!(f, "\n")?;
 
-        for event in &self.events {
-            write!(f, "{:?}\n", event)?;
+        for (i, event) in self.events.iter().enumerate() {
+            write!(f, "  #{:0>3} {:?}\n", i + 1, event)?;
         }
 
         Ok(())
