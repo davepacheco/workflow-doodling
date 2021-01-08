@@ -138,11 +138,8 @@ struct TaskParams {
  * etc.
  */
 pub struct WfExecutor {
-    /* See `Workflow` */
-    graph: Graph<String, ()>,
-    node_names: BTreeMap<NodeIndex, String>,
-    start_node: NodeIndex,
-    end_node: NodeIndex,
+    // TODO This could probably be a reference instead.
+    workflow: Arc<Workflow>,
 
     /** Channel for monitoring execution completion */
     finish_tx: broadcast::Sender<()>,
@@ -159,7 +156,7 @@ pub struct WfExecutor {
 
 impl WfExecutor {
     /** Create an executor to run the given workflow. */
-    pub fn new(w: Workflow) -> WfExecutor {
+    pub fn new(w: Arc<Workflow>) -> WfExecutor {
         let workflow_id = Uuid::new_v4();
         // TODO "myself" here should be a hostname or other identifier for this
         // instance.
@@ -172,7 +169,7 @@ impl WfExecutor {
      * started, using the given log events.
      */
     pub fn new_recover(
-        w: Workflow,
+        w: Arc<Workflow>,
         wflog: WfLog,
     ) -> Result<WfExecutor, WfError> {
         /*
@@ -246,10 +243,7 @@ impl WfExecutor {
         let live_state = recovery.to_live_state(&w, wflog);
 
         Ok(WfExecutor {
-            graph: w.graph,
-            node_names: w.node_names,
-            start_node: w.start,
-            end_node: w.end,
+            workflow: Arc::clone(&w),
             workflow_id,
             finish_tx,
             live_state: Arc::new(Mutex::new(live_state)),
@@ -271,7 +265,7 @@ impl WfExecutor {
         live_state: &WfExecLiveState,
         node: NodeIndex,
     ) {
-        let ancestors = self.graph.neighbors_directed(node, Incoming);
+        let ancestors = self.workflow.graph.neighbors_directed(node, Incoming);
         for ancestor in ancestors {
             self.make_ancestor_tree_node(tree, live_state, ancestor);
         }
@@ -283,7 +277,7 @@ impl WfExecutor {
         live_state: &WfExecLiveState,
         node: NodeIndex,
     ) {
-        if node == self.start_node {
+        if node == self.workflow.start_node {
             return;
         }
 
@@ -296,7 +290,7 @@ impl WfExecutor {
          * finished cancelling descendants, which would include the current
          * node.
          */
-        let name = self.node_names[&node].to_string();
+        let name = self.workflow.node_names[&node].to_string();
         let output = live_state.node_output(node);
         tree.insert(name, output);
         self.make_ancestor_tree(tree, live_state, node);
@@ -339,7 +333,7 @@ impl WfExecutor {
          * completion of the compensating action.  We bound this channel's size
          * at twice the graph node count for this worst case.
          */
-        let (tx, mut rx) = mpsc::channel(2 * self.graph.node_count());
+        let (tx, mut rx) = mpsc::channel(2 * self.workflow.graph.node_count());
 
         /*
          * Kick off any nodes that are ready to run already.
@@ -491,19 +485,19 @@ impl WfExecutor {
     }
 
     async fn unblock_dependents(&self, node_id: NodeIndex) -> bool {
+        let graph = &self.workflow.graph;
         let mut live_state = self.live_state.lock().await;
 
         // TODO this condition needs work.  It doesn't account for
         // failed nodes or unwinding or anything.
-        if self.graph.node_count() == live_state.node_outputs.len() {
+        if graph.node_count() == live_state.node_outputs.len() {
             live_state.mark_workflow_done();
             self.finish_tx.send(()).expect("failed to send finish message");
             return true;
         }
 
-        for depnode in self.graph.neighbors_directed(node_id, Outgoing) {
-            if parents_satisfied(&self.graph, &live_state.node_states, depnode)
-            {
+        for depnode in graph.neighbors_directed(node_id, Outgoing) {
+            if parents_satisfied(&graph, &live_state.node_states, depnode) {
                 live_state.node_make_ready(depnode);
             }
         }
@@ -535,11 +529,13 @@ impl WfExecutor {
 
         let mut node_results = BTreeMap::new();
         for (node_id, output) in &live_state.node_outputs {
-            if *node_id == self.start_node || *node_id == self.end_node {
+            if *node_id == self.workflow.start_node
+                || *node_id == self.workflow.end_node
+            {
                 continue;
             }
 
-            let node_name = &self.node_names[node_id];
+            let node_name = &self.workflow.node_names[node_id];
             node_results.insert(node_name.clone(), Ok(Arc::clone(output)));
         }
 
@@ -563,26 +559,27 @@ impl WfExecutor {
     {
         /* TODO-cleanup There must be a better way to do this. */
         let mut max_depth_of_node: BTreeMap<NodeIndex, usize> = BTreeMap::new();
-        max_depth_of_node.insert(self.start_node, 0);
+        max_depth_of_node.insert(self.workflow.start_node, 0);
 
         let mut nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>> =
             BTreeMap::new();
 
-        let topo_visitor = Topo::new(&self.graph);
-        for node in topo_visitor.iter(&self.graph) {
+        let graph = &self.workflow.graph;
+        let topo_visitor = Topo::new(graph);
+        for node in topo_visitor.iter(graph) {
             if let Some(d) = max_depth_of_node.get(&node) {
                 assert_eq!(*d, 0);
-                assert_eq!(node, self.start_node);
+                assert_eq!(node, self.workflow.start_node);
                 assert_eq!(max_depth_of_node.len(), 1);
                 continue;
             }
 
-            if node == self.end_node {
+            if node == self.workflow.end_node {
                 continue;
             }
 
             let mut max_parent_depth: Option<usize> = None;
-            for p in self.graph.neighbors_directed(node, Incoming) {
+            for p in graph.neighbors_directed(node, Incoming) {
                 let parent_depth = *max_depth_of_node.get(&p).unwrap();
                 match max_parent_depth {
                     Some(x) if x >= parent_depth => (),
@@ -618,13 +615,13 @@ impl WfExecutor {
                 )?;
                 if nodes.len() == 1 {
                     let node = nodes[0];
-                    let node_name = &self.node_names[&node];
+                    let node_name = &self.workflow.node_names[&node];
                     let node_state = live_state.node_state(node);
                     write!(out, "{}: {}\n", node_state, node_name)?;
                 } else {
                     write!(out, "+ (actions in parallel)\n")?;
                     for node in nodes {
-                        let node_name = &self.node_names[&node];
+                        let node_name = &self.workflow.node_names[&node];
                         let node_state = live_state.node_state(node);
                         let child_workflows =
                             live_state.child_workflows.get(&node);
@@ -853,9 +850,9 @@ impl WfRecovery {
          * other.  WWe can determine this by looking at the start and end nodes
          * of the graph.
          */
-        let start_state = self.node_state(w.start);
+        let start_state = self.node_state(w.start_node);
         assert_ne!(start_state, WfNodeState::Blocked);
-        let end_state = self.node_state(w.end);
+        let end_state = self.node_state(w.end_node);
         /* TODO There are more cases than this. */
         let exec_state = if end_state == WfNodeState::Done {
             /*
@@ -1060,7 +1057,7 @@ impl WfContext {
      * constructed what the whole graph looks like, instead of only knowing
      * about child workflows once we start executing the node that creates them.
      */
-    pub async fn child_workflow(&self, wf: Workflow) -> Arc<WfExecutor> {
+    pub async fn child_workflow(&self, wf: Arc<Workflow>) -> Arc<WfExecutor> {
         /*
          * TODO Really we want this to reach into the parent WfExecutor and make
          * a record about this new execution.  This is mostly for observability

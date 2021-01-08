@@ -37,7 +37,7 @@ use workflow_doodling::Workflow;
 /*
  * Construct a demo "provision" workflow matching the description above.
  */
-pub fn make_provision_workflow() -> Workflow {
+pub fn make_provision_workflow() -> Arc<Workflow> {
     let mut w = WfBuilder::new();
 
     w.append(
@@ -62,7 +62,7 @@ pub fn make_provision_workflow() -> Workflow {
         WfActionFunc::new_action(demo_prov_instance_boot),
     );
     w.append("print", WfActionFunc::new_action(demo_prov_print));
-    w.build()
+    Arc::new(w.build())
 }
 
 async fn demo_prov_instance_create(_wfctx: WfContext) -> WfFuncResult {
@@ -91,7 +91,7 @@ async fn demo_prov_server_alloc(wfctx: WfContext) -> WfFuncResult {
         "server_reserve",
         WfActionFunc::new_action(demo_prov_server_reserve),
     );
-    let wf = w.build();
+    let wf = Arc::new(w.build());
 
     let e = wfctx.child_workflow(wf).await;
     e.run().await;
@@ -167,7 +167,7 @@ async fn main() {
     eprintln!("{:?}", w);
 
     eprintln!("*** initial state ***");
-    let e = WfExecutor::new(w);
+    let e = WfExecutor::new(Arc::clone(&w));
     e.print_status(&mut stderr, 0).await.unwrap();
 
     eprintln!("*** running workflow ***");
@@ -188,7 +188,7 @@ async fn main() {
     recover_workflow_log(&mut wflog, events).unwrap();
     eprintln!("*** recovery using these events: ***");
     eprintln!("{:?}", wflog);
-    let e = WfExecutor::new_recover(make_provision_workflow(), wflog).unwrap();
+    let e = WfExecutor::new_recover(Arc::clone(&w), wflog).unwrap();
     eprintln!("*** initial state (recovered workflow): ***");
     e.print_status(&mut stderr, 0).await.unwrap();
     e.run().await;

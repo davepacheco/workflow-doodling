@@ -19,7 +19,16 @@ TODO
 - Implement unwinding
 - Open questions above
 - Major areas to derisk above
+- Implement Serialize + Deserialize for the WfOutput type.  This isn't necessary at the moment but seems very important to derisk.
+  see: https://github.com/dtolnay/typetag/issues/1
+  see notes from Cliff
 - There's also a ton of cleanup to do here.
+  - Lots of TODOs
+  - Reconsider:
+    - naming (Workflow vs. WorkflowExecution?  Sagas?)
+    - prefixes (Wf prefix on most things)
+    - what's exported publicly
+    - what code is in what files
 - Subworkflows and recovery: this might "just work" if workflow actions that
   create subworkflows were idempotent.  But I don't think they are today.
   Maybe if we first-class `WfActionWorkflow`, the framework can ensure that

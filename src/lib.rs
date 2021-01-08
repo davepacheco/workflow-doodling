@@ -166,8 +166,8 @@ pub struct Workflow {
     // than needing Arc<dyn WfAction> and copying these other fields.
     launchers: BTreeMap<NodeIndex, Arc<dyn WfAction>>,
     node_names: BTreeMap<NodeIndex, String>,
-    start: NodeIndex,
-    end: NodeIndex,
+    start_node: NodeIndex,
+    end_node: NodeIndex,
 }
 
 impl Debug for Workflow {
@@ -318,8 +318,8 @@ impl WfBuilder {
             graph: self.graph,
             launchers: self.launchers,
             node_names: self.node_names,
-            start: self.root,
-            end: newnode,
+            start_node: self.root,
+            end_node: newnode,
         }
     }
 }
