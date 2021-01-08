@@ -174,4 +174,8 @@ async fn main() {
 
     eprintln!("*** final state ***");
     e.print_status(&mut stderr, 0).await.unwrap();
+
+    eprintln!("*** final log ***");
+    let result = e.result();
+    eprintln!("{:?}", result.wflog);
 }

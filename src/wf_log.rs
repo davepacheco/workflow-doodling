@@ -9,7 +9,9 @@ use anyhow::anyhow;
 use anyhow::Context;
 use chrono::DateTime;
 use chrono::Utc;
+use std::any::type_name_of_val;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 pub type WfNodeId = u64;
@@ -35,6 +37,20 @@ pub enum WfNodeEventType {
     CancelStarted,
     /** The cancel action has finished */
     CancelFinished,
+}
+
+impl fmt::Display for WfNodeEventType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WfNodeEventType::Started => f.write_str("started"),
+            WfNodeEventType::Succeeded(o) => {
+                write!(f, "succeeded (output type: {})", type_name_of_val(o))
+            }
+            WfNodeEventType::Failed => f.write_str("failed"),
+            WfNodeEventType::CancelStarted => f.write_str("cancel started"),
+            WfNodeEventType::CancelFinished => f.write_str("cancel finished"),
+        }
+    }
 }
 
 /**
@@ -121,6 +137,19 @@ pub struct WfNodeEvent {
     creator: String,
 }
 
+impl fmt::Debug for WfNodeEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {:>3} {}",
+            self.event_time.to_rfc3339(),
+            self.creator,
+            self.node_id,
+            self.event_type
+        )
+    }
+}
+
 /**
  * Write to a workflow's log
  */
@@ -183,6 +212,22 @@ impl WfLog {
         self.node_status
             .get(&node_id)
             .unwrap_or(&WfNodeLoadStatus::NeverStarted)
+    }
+}
+
+impl fmt::Debug for WfLog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "WORKFLOW LOG:\n")?;
+        write!(f, "workflow execution id: {}\n", self.workflow_id)?;
+        write!(f, "creator:               {}\n", self.creator)?;
+        write!(f, "events ({} total):\n", self.events.len())?;
+        write!(f, "\n")?;
+
+        for event in &self.events {
+            write!(f, "{:?}\n", event)?;
+        }
+
+        Ok(())
     }
 }
 
