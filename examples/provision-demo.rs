@@ -25,11 +25,14 @@
 
 use std::io;
 use std::sync::Arc;
+use uuid::Uuid;
+use workflow_doodling::recover_workflow_log;
 use workflow_doodling::WfActionFunc;
 use workflow_doodling::WfBuilder;
 use workflow_doodling::WfContext;
 use workflow_doodling::WfExecutor;
 use workflow_doodling::WfFuncResult;
+use workflow_doodling::WfLog;
 use workflow_doodling::Workflow;
 
 /*
@@ -178,4 +181,18 @@ async fn main() {
     eprintln!("*** final log ***");
     let result = e.result();
     eprintln!("{:?}", result.wflog);
+
+    /* Exercise recovery. */
+    let mut events = result.wflog.events().clone();
+    events.truncate(10);
+    let mut wflog = WfLog::new("example", result.wflog.workflow_id);
+    eprintln!("*** recovery using these events: ***");
+    eprintln!("{:?}", wflog);
+    recover_workflow_log(&mut wflog, events).unwrap();
+    let e = WfExecutor::new_recover(make_provision_workflow(), wflog).unwrap();
+    eprintln!("*** initial state (recovered workflow): ***");
+    e.print_status(&mut stderr, 0).await.unwrap();
+    e.run().await;
+    eprintln!("*** final state (recovered workflow): ***");
+    e.print_status(&mut stderr, 0).await.unwrap();
 }

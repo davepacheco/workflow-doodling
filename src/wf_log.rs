@@ -209,6 +209,10 @@ impl WfLog {
             .get(&node_id)
             .unwrap_or(&WfNodeLoadStatus::NeverStarted)
     }
+
+    pub fn events(&self) -> &Vec<WfNodeEvent> {
+        &self.events
+    }
 }
 
 impl fmt::Debug for WfLog {
