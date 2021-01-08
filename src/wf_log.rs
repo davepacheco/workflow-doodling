@@ -8,8 +8,8 @@ use crate::WfOutput;
 use anyhow::anyhow;
 use anyhow::Context;
 use chrono::DateTime;
+use chrono::SecondsFormat;
 use chrono::Utc;
-use std::any::type_name_of_val;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -41,15 +41,13 @@ pub enum WfNodeEventType {
 
 impl fmt::Display for WfNodeEventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WfNodeEventType::Started => f.write_str("started"),
-            WfNodeEventType::Succeeded(o) => {
-                write!(f, "succeeded (output type: {})", type_name_of_val(o))
-            }
-            WfNodeEventType::Failed => f.write_str("failed"),
-            WfNodeEventType::CancelStarted => f.write_str("cancel started"),
-            WfNodeEventType::CancelFinished => f.write_str("cancel finished"),
-        }
+        f.write_str(match self {
+            WfNodeEventType::Started => "started",
+            WfNodeEventType::Succeeded(_) => "succeeded",
+            WfNodeEventType::Failed => "failed",
+            WfNodeEventType::CancelStarted => "cancel started",
+            WfNodeEventType::CancelFinished => "cancel finished",
+        })
     }
 }
 
@@ -130,23 +128,17 @@ pub struct WfNodeEvent {
 
     /* The following debugging fields are not used in the code. */
     /** when this event was recorded (for debugging) */
-    #[allow(dead_code)]
     event_time: DateTime<Utc>,
     /** creator of this event (e.g., a hostname, for debugging) */
-    #[allow(dead_code)]
     creator: String,
 }
 
 impl fmt::Debug for WfNodeEvent {
-    /*
-     * TODO We'd save a lot of horizontal space (9 columns) by dropping
-     * precision after milliseconds and the time zone.
-     */
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{} {} N{:0>3} {}",
-            self.event_time.to_rfc3339(),
+            self.event_time.to_rfc3339_opts(SecondsFormat::Millis, true),
             self.creator,
             self.node_id,
             self.event_type
@@ -228,7 +220,7 @@ impl fmt::Debug for WfLog {
         write!(f, "\n")?;
 
         for (i, event) in self.events.iter().enumerate() {
-            write!(f, "  #{:0>3} {:?}\n", i + 1, event)?;
+            write!(f, "{:0>3} {:?}\n", i + 1, event)?;
         }
 
         Ok(())
