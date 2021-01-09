@@ -25,7 +25,8 @@ TODO
 - There's also a ton of cleanup to do here.
   - Lots of TODOs
   - Reconsider:
-    - naming (Workflow vs. WorkflowExecution?  Sagas?)
+    - naming (Workflow vs. WorkflowExecution?  Sagas?).  Maybe rename cancel ->
+      undo?
     - prefixes (Wf prefix on most things)
     - what's exported publicly
     - what code is in what files

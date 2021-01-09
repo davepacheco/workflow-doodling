@@ -46,7 +46,6 @@ use uuid::Uuid;
  * unwinding yet.
  */
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-#[allow(dead_code)]
 enum WfNodeState {
     Blocked,
     Ready,
@@ -68,7 +67,6 @@ enum WfNodeState {
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum WfState {
     Running,
-    #[allow(dead_code)] // TODO Not yet implemented
     Unwinding,
     Done,
 }
@@ -95,6 +93,8 @@ impl fmt::Display for WfNodeState {
 /**
  * Message sent from (tokio) task that executes an action to the executor
  * indicating that the action has completed
+ * XXX This should probably be an enum with different values for whether this
+ * was a forward execution or a cancellation.
  */
 struct TaskCompletion {
     node_id: NodeIndex,
@@ -123,6 +123,8 @@ struct TaskParams {
     action: Arc<dyn WfAction>,
     /** Skip logging the "start" record (if this is a restart) */
     skip_log_start: bool,
+    /** This node is being cancelled, not run normally */
+    unwinding: bool,
 }
 
 /**
@@ -185,6 +187,7 @@ impl WfExecutor {
         let workflow_id = wflog.workflow_id;
         let topo_visitor = Topo::new(&w.graph);
         let mut recovery = WfRecovery::new();
+        let forward = !wflog.unwinding;
 
         for node_id in topo_visitor.iter(&w.graph) {
             let node_status =
@@ -210,29 +213,20 @@ impl WfExecutor {
                 }
             }
 
-            match node_status {
-                WfNodeLoadStatus::NeverStarted => {
-                    /*
-                     * If the parent nodes are satisfied, then we must mark this
-                     * node ready to run.
-                     */
-                    if parents_satisfied(
-                        &w.graph,
-                        &recovery.node_states,
-                        node_id,
-                    ) {
-                        recovery.node_ready(node_id);
-                    }
-                }
-                WfNodeLoadStatus::Started => {
-                    recovery.node_restart(node_id);
-                }
-                WfNodeLoadStatus::Succeeded(o) => {
-                    recovery.node_succeeded(node_id, Arc::clone(o));
-                }
-                _ => {
-                    todo!("handle cancellation states");
-                }
+            if forward {
+                WfExecutor::recover_node_forward(
+                    &w,
+                    node_id,
+                    &node_status,
+                    &mut recovery,
+                );
+            } else {
+                WfExecutor::recover_node_unwind(
+                    &w,
+                    node_id,
+                    &node_status,
+                    &mut recovery,
+                );
             }
         }
 
@@ -250,6 +244,49 @@ impl WfExecutor {
         })
     }
 
+    fn recover_node_forward(
+        workflow: &Workflow,
+        node_id: NodeIndex,
+        node_status: &WfNodeLoadStatus,
+        recovery: &mut WfRecovery,
+    ) {
+        match node_status {
+            WfNodeLoadStatus::NeverStarted => {
+                /*
+                 * If the parent nodes are satisfied, then we must mark this
+                 * node ready to run.
+                 */
+                let graph = &workflow.graph;
+                if parents_satisfied(graph, &recovery.node_states, node_id) {
+                    recovery.node_ready(node_id);
+                }
+            }
+            WfNodeLoadStatus::Started => {
+                recovery.node_restart(node_id);
+            }
+            WfNodeLoadStatus::Succeeded(o) => {
+                recovery.node_succeeded(node_id, Arc::clone(o));
+            }
+            _ => {
+                todo!("handle cancellation states");
+            }
+        }
+    }
+
+    fn recover_node_unwind(
+        workflow: &Workflow,
+        node_id: NodeIndex,
+        node_status: &WfNodeLoadStatus,
+        recovery: &mut WfRecovery,
+    ) {
+        // XXX XXX XXX working here
+        // NOTE: it may make more sense in this case to walk through the graph
+        // in reverse topological order, for the same reason that we want to go
+        // in topological order when going forward: we want to know the state of
+        // our *children* in the DAG to determine what to do with *us*.
+        todo!();
+    }
+
     /**
      * Builds the "ancestor tree" for a node whose dependencies have all
      * completed
@@ -264,7 +301,13 @@ impl WfExecutor {
         tree: &mut BTreeMap<String, WfOutput>,
         live_state: &WfExecLiveState,
         node: NodeIndex,
+        include_self: bool,
     ) {
+        if include_self {
+            self.make_ancestor_tree_node(tree, live_state, node);
+            return;
+        }
+
         let ancestors = self.workflow.graph.neighbors_directed(node, Incoming);
         for ancestor in ancestors {
             self.make_ancestor_tree_node(tree, live_state, ancestor);
@@ -293,7 +336,7 @@ impl WfExecutor {
         let name = self.workflow.node_names[&node].to_string();
         let output = live_state.node_output(node);
         tree.insert(name, output);
-        self.make_ancestor_tree(tree, live_state, node);
+        self.make_ancestor_tree(tree, live_state, node, false);
     }
 
     /**
@@ -353,7 +396,12 @@ impl WfExecutor {
             let node_id = message.node_id;
             let (task, node_state) = {
                 let mut live_state = self.live_state.lock().await;
-                live_state.node_make_done(node_id, &message.result);
+                let node_state = *live_state.node_states.get(&node_id).unwrap();
+                if node_state != WfNodeState::FinishingCancel {
+                    live_state.node_make_done(node_id, &message.result);
+                } else {
+                    live_state.node_make_cancelled(node_id);
+                }
                 (
                     live_state.node_task_done(node_id),
                     *live_state.node_states.get(&node_id).unwrap(),
@@ -370,12 +418,16 @@ impl WfExecutor {
 
             if node_state == WfNodeState::Failed {
                 todo!(); // TODO trigger unwind!
+            } else {
+                assert!(
+                    node_state == WfNodeState::Done
+                        || node_state == WfNodeState::Cancelled
+                );
+                if self.unblock_dependents(node_id).await {
+                    break;
+                }
             }
 
-            assert_eq!(node_state, WfNodeState::Done);
-            if self.unblock_dependents(node_id).await {
-                break;
-            }
             self.kick_off_ready(&tx).await;
         }
     }
@@ -397,24 +449,60 @@ impl WfExecutor {
 
         for node_id in ready_to_run {
             let node_state = live_state.node_states[&node_id];
+            let unwinding = if live_state.exec_state == WfState::Running {
+                /*
+                 * Logically, during normal execution a node should be in the
+                 * "ready" state when we get here.  This is a bit kludgy, but
+                 * during recovery we use the state "Starting" here to indicate
+                 * that the node has already been started.  See exec_node().
+                 */
+                assert!(
+                    node_state == WfNodeState::Ready
+                        || node_state == WfNodeState::Starting
+                );
+                false
+            } else {
+                /*
+                 * If we're unwinding a workflow, when a node gets here then
+                 * it's either (1) been previously started, in which case we
+                 * need to finish executing the normal action before we cancel
+                 * it (in which case it will be in state "starting" for the
+                 * reason mentioned above) or (2) successfully completed in the
+                 * past (in which case it's "done").  If it never started, we
+                 * wouldn't bother running anything to cancel it.  If it failed,
+                 * we don't cancel it.
+                 *
+                 * Relatedly, just because we're unwinding the workflow does
+                 * not mean we're cancelling this node now.
+                 * XXX We should recheck if CancelStarted belongs here for the
+                 * same reason that Starting belongs above.
+                 */
+                assert_eq!(live_state.exec_state, WfState::Unwinding);
+                // XXX recheck this condition and the value of this block
+                assert!(
+                    node_state == WfNodeState::Done
+                        || node_state == WfNodeState::Starting
+                );
+                node_state == WfNodeState::Done
+            };
+
             /*
-             * This is a bit kludgy, but during recovery we use the state
-             * "Starting" here to indicate that the node has already been
-             * started.  See exec_node().
+             * TODO we could be much more efficient without copying this tree
+             * each time.
              */
-            assert!(
-                node_state == WfNodeState::Ready
-                    || node_state == WfNodeState::Starting
+            let mut ancestor_tree = BTreeMap::new();
+            self.make_ancestor_tree(
+                &mut ancestor_tree,
+                &live_state,
+                node_id,
+                unwinding,
             );
 
+            /* XXX need a way to get the actual compensation action here! */
             let wfaction = live_state
                 .launchers
                 .remove(&node_id)
                 .expect("missing action for node");
-            // TODO we could be much more efficient without copying this tree
-            // each time.
-            let mut ancestor_tree = BTreeMap::new();
-            self.make_ancestor_tree(&mut ancestor_tree, &live_state, node_id);
 
             let task_params = TaskParams {
                 live_state: Arc::clone(&self.live_state),
@@ -423,10 +511,16 @@ impl WfExecutor {
                 ancestor_tree,
                 action: wfaction,
                 skip_log_start: node_state == WfNodeState::Starting,
+                unwinding,
             };
 
-            let task = tokio::spawn(WfExecutor::exec_node(task_params));
-            live_state.node_make_starting(node_id, task);
+            if !unwinding {
+                let task = tokio::spawn(WfExecutor::exec_node(task_params));
+                live_state.node_make_starting(node_id, task);
+            } else {
+                let task = tokio::spawn(WfExecutor::cancel_node(task_params));
+                live_state.node_make_cancelling(node_id, task);
+            }
         }
     }
 
@@ -435,6 +529,7 @@ impl WfExecutor {
      */
     async fn exec_node(mut task_params: TaskParams) {
         let node_id = task_params.node_id;
+        assert!(!task_params.unwinding);
 
         {
             /*
@@ -484,21 +579,119 @@ impl WfExecutor {
             .expect("unexpected channel failure");
     }
 
+    /**
+     * Body of a (tokio) task that executes a compensation action.
+     */
+    /*
+     * XXX This has a lot in common with exec_node(), but enough different that
+     * it doesn't make sense to parametrize that one.  Still, it sure would be
+     * nice to clean this up.
+     */
+    async fn cancel_node(mut task_params: TaskParams) {
+        let node_id = task_params.node_id;
+        assert!(task_params.unwinding);
+
+        {
+            let mut live_state = task_params.live_state.lock().await;
+            if !task_params.skip_log_start {
+                WfExecutor::record_now(
+                    &mut live_state.wflog,
+                    node_id,
+                    WfNodeEventType::CancelStarted,
+                )
+                .await;
+            }
+            live_state.node_make_state(node_id, WfNodeState::Cancelling);
+        }
+
+        let exec_future = task_params.action.do_it(WfContext {
+            ancestor_tree: task_params.ancestor_tree,
+            node_id,
+            live_state: Arc::clone(&task_params.live_state),
+        });
+        exec_future.await;
+        {
+            let mut live_state = task_params.live_state.lock().await;
+            live_state.node_make_state(node_id, WfNodeState::FinishingCancel);
+            WfExecutor::record_now(
+                &mut live_state.wflog,
+                node_id,
+                WfNodeEventType::CancelFinished,
+            )
+            .await;
+        }
+
+        task_params
+            .done_tx
+            .try_send(TaskCompletion { node_id, result: Ok(Arc::new(())) })
+            .expect("unexpected channel failure");
+    }
+
     async fn unblock_dependents(&self, node_id: NodeIndex) -> bool {
         let graph = &self.workflow.graph;
         let mut live_state = self.live_state.lock().await;
+        let node_states = &live_state.node_states;
 
         // TODO this condition needs work.  It doesn't account for
         // failed nodes or unwinding or anything.
-        if graph.node_count() == live_state.node_outputs.len() {
-            live_state.mark_workflow_done();
-            self.finish_tx.send(()).expect("failed to send finish message");
-            return true;
+        if live_state.exec_state == WfState::Running {
+            let end_node = &self.workflow.end_node;
+            if let Some(end_node_state) = node_states.get(end_node) {
+                if *end_node_state == WfNodeState::Done {
+                    assert_eq!(
+                        graph.node_count(),
+                        live_state.node_outputs.len()
+                    );
+                    live_state.mark_workflow_done();
+                    self.finish_tx
+                        .send(())
+                        .expect("failed to send finish message");
+                    return true;
+                }
+            }
+        } else {
+            assert_eq!(live_state.exec_state, WfState::Unwinding);
+            let start_node = &self.workflow.start_node;
+            if let Some(start_node_state) = node_states.get(start_node) {
+                if *start_node_state == WfNodeState::Cancelled {
+                    live_state.mark_workflow_done();
+                    self.finish_tx
+                        .send(())
+                        .expect("failed to send finish message");
+                    return true;
+                }
+            }
         }
 
-        for depnode in graph.neighbors_directed(node_id, Outgoing) {
-            if parents_satisfied(&graph, &live_state.node_states, depnode) {
-                live_state.node_make_ready(depnode);
+        let node_state = node_states.get(&node_id).unwrap();
+        if live_state.exec_state == WfState::Running {
+            assert_eq!(*node_state, WfNodeState::Done);
+            for depnode in graph.neighbors_directed(node_id, Outgoing) {
+                if parents_satisfied(&graph, &live_state.node_states, depnode) {
+                    live_state.node_make_ready(depnode);
+                }
+            }
+        } else {
+            assert_eq!(live_state.exec_state, WfState::Unwinding);
+            /*
+             * We're unwinding.  If this node just finished its normal action,
+             * immediately mark it ready again for cancellation.  And there's
+             * nothing else to do because its parents are not yet ready for
+             * cancellation.
+             */
+            if *node_state == WfNodeState::Done {
+                live_state.node_make_ready_cancel(node_id);
+            } else {
+                assert_eq!(*node_state, WfNodeState::Cancelled);
+                for depnode in graph.neighbors_directed(node_id, Incoming) {
+                    if children_satisfied(
+                        &graph,
+                        &live_state.node_states,
+                        depnode,
+                    ) {
+                        live_state.node_make_ready_cancel(depnode);
+                    }
+                }
             }
         }
 
@@ -699,7 +892,10 @@ struct WfExecLiveState {
 impl WfExecLiveState {
     fn mark_workflow_done(&mut self) {
         assert!(self.ready.is_empty());
-        assert_eq!(self.exec_state, WfState::Running);
+        assert!(
+            self.exec_state == WfState::Running
+                || self.exec_state == WfState::Unwinding
+        );
         self.exec_state = WfState::Done;
     }
 
@@ -737,6 +933,11 @@ impl WfExecLiveState {
         self.ready.push(node_id);
     }
 
+    fn node_make_ready_cancel(&mut self, node_id: NodeIndex) {
+        assert_eq!(self.node_state(node_id), WfNodeState::Done);
+        self.ready.push(node_id);
+    }
+
     fn node_make_done(&mut self, node_id: NodeIndex, output: &WfResult) {
         if let Ok(output) = output {
             self.node_outputs
@@ -748,9 +949,24 @@ impl WfExecLiveState {
         }
     }
 
+    fn node_make_cancelled(&mut self, node_id: NodeIndex) {
+        self.node_states.insert(node_id, WfNodeState::Cancelled);
+    }
+
     fn node_make_starting(&mut self, node_id: NodeIndex, task: JoinHandle<()>) {
         self.node_states
             .insert(node_id, WfNodeState::Starting)
+            .expect("started node that had no previous state");
+        self.node_tasks.insert(node_id, task);
+    }
+
+    fn node_make_cancelling(
+        &mut self,
+        node_id: NodeIndex,
+        task: JoinHandle<()>,
+    ) {
+        self.node_states
+            .insert(node_id, WfNodeState::StartingCancel)
             .expect("started node that had no previous state");
         self.node_tasks.insert(node_id, task);
     }
@@ -760,7 +976,11 @@ impl WfExecLiveState {
             .node_states
             .get(&node_id)
             .expect("processing task completion for task with no state");
-        assert!(state == WfNodeState::Done || state == WfNodeState::Failed);
+        assert!(
+            state == WfNodeState::Done
+                || state == WfNodeState::Failed
+                || state == WfNodeState::Cancelled
+        );
         self.node_tasks
             .remove(&node_id)
             .expect("processing task completion with no task present")
@@ -932,8 +1152,27 @@ fn parents_satisfied(
 ) -> bool {
     for p in graph.neighbors_directed(node_id, Incoming) {
         let node_state = node_states.get(&p).unwrap_or(&WfNodeState::Blocked);
-        // TODO more general in the case of failure?
         if *node_state != WfNodeState::Done {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Checks whether all of this node's outgoing edges are now satisfied for
+ * cancellation.
+ */
+/* TODO commonize with parents_satisfied() */
+fn children_satisfied(
+    graph: &Graph<String, ()>,
+    node_states: &BTreeMap<NodeIndex, WfNodeState>,
+    node_id: NodeIndex,
+) -> bool {
+    for p in graph.neighbors_directed(node_id, Outgoing) {
+        let node_state = node_states.get(&p).unwrap_or(&WfNodeState::Blocked);
+        if *node_state != WfNodeState::Cancelled {
             return false;
         }
     }

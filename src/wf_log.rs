@@ -160,6 +160,7 @@ impl fmt::Debug for WfNodeEvent {
 pub struct WfLog {
     // TODO include version here
     pub workflow_id: WfId,
+    pub unwinding: bool,
     creator: String,
     events: Vec<WfNodeEvent>,
     node_status: BTreeMap<WfNodeId, WfNodeLoadStatus>,
@@ -172,6 +173,7 @@ impl WfLog {
             creator: creator.to_string(),
             events: Vec::new(),
             node_status: BTreeMap::new(),
+            unwinding: false,
         }
     }
 
@@ -203,8 +205,18 @@ impl WfLog {
         let current_status = self.load_status_for_node(event.node_id);
         let next_status = current_status.next_status(&event.event_type)?;
 
+        match next_status {
+            WfNodeLoadStatus::Failed
+            | WfNodeLoadStatus::CancelStarted
+            | WfNodeLoadStatus::CancelFinished => {
+                self.unwinding = true;
+            }
+            _ => (),
+        };
+
         self.node_status.insert(event.node_id, next_status);
         self.events.push(event);
+
         Ok(())
     }
 
@@ -224,6 +236,11 @@ impl fmt::Debug for WfLog {
         write!(f, "WORKFLOW LOG:\n")?;
         write!(f, "workflow execution id: {}\n", self.workflow_id)?;
         write!(f, "creator:               {}\n", self.creator)?;
+        write!(
+            f,
+            "direction:             {}\n",
+            if self.unwinding { "forward" } else { "unwinding" }
+        )?;
         write!(f, "events ({} total):\n", self.events.len())?;
         write!(f, "\n")?;
 
