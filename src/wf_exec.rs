@@ -416,9 +416,7 @@ impl WfExecutor {
              */
             task.await.expect("node task failed unexpectedly");
 
-            if node_state == WfNodeState::Failed {
-                todo!(); // TODO trigger unwind!
-            } else {
+            if node_state != WfNodeState::Failed {
                 assert!(
                     node_state == WfNodeState::Done
                         || node_state == WfNodeState::Cancelled
@@ -426,6 +424,46 @@ impl WfExecutor {
                 if self.unblock_dependents(node_id).await {
                     break;
                 }
+
+                self.kick_off_ready(&tx).await;
+                continue;
+            }
+
+            assert_eq!(node_state, WfNodeState::Failed);
+            let unblock_dependents = {
+                let mut live_state = self.live_state.lock().await;
+                if live_state.exec_state == WfState::Unwinding {
+                    /*
+                     * This node failed while we're already unwinding.  We don't
+                     * need to kick off unwinding again.  We could in theory
+                     * immediately move this node to "cancelled" and unblock its
+                     * dependents, but for consistency with a simpler algorithm,
+                     * we'll wait for cancellation to propagate from the end
+                     * node.  If all of our children are already cancelled,
+                     * however, we must go ahead and mark ourselves cancelled
+                     * and propagate that.
+                     */
+                    if children_satisfied(
+                        &self.workflow.graph,
+                        &live_state.node_states,
+                        node_id,
+                    ) {
+                        live_state.node_make_cancelled(node_id);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    /* Begin the unwinding process. */
+                    live_state.exec_state = WfState::Unwinding;
+                    live_state.node_make_ready_cancel(self.workflow.end_node);
+                    false
+                }
+            };
+
+            if unblock_dependents {
+                // TODO is it okay to put a side effect inside assert here?
+                assert!(!self.unblock_dependents(node_id).await);
             }
 
             self.kick_off_ready(&tx).await;
@@ -448,7 +486,7 @@ impl WfExecutor {
         live_state.ready = Vec::new();
 
         for node_id in ready_to_run {
-            let node_state = live_state.node_states[&node_id];
+            let node_state = live_state.node_state(node_id);
             let unwinding = if live_state.exec_state == WfState::Running {
                 /*
                  * Logically, during normal execution a node should be in the
@@ -464,13 +502,13 @@ impl WfExecutor {
             } else {
                 /*
                  * If we're unwinding a workflow, when a node gets here then
-                 * it's either (1) been previously started, in which case we
+                 * it's either (1) never been started, in which case this will
+                 * be trivial, (2) been previously started, in which case we
                  * need to finish executing the normal action before we cancel
                  * it (in which case it will be in state "starting" for the
-                 * reason mentioned above) or (2) successfully completed in the
-                 * past (in which case it's "done").  If it never started, we
-                 * wouldn't bother running anything to cancel it.  If it failed,
-                 * we don't cancel it.
+                 * reason mentioned above), (3) successfully completed in the
+                 * past (in which case it's "done"), or (4) failed.  If it never
+                 * started, we wouldn't bother running anything to cancel it.
                  *
                  * Relatedly, just because we're unwinding the workflow does
                  * not mean we're cancelling this node now.
@@ -482,9 +520,37 @@ impl WfExecutor {
                 assert!(
                     node_state == WfNodeState::Done
                         || node_state == WfNodeState::Starting
+                        || node_state == WfNodeState::Blocked
+                        || node_state == WfNodeState::Failed
                 );
-                node_state == WfNodeState::Done
+                node_state != WfNodeState::Starting
             };
+
+            /*
+             * If we're unwinding a node that has never started or failed,
+             * there's very little to do.
+             */
+            if (node_state == WfNodeState::Blocked
+                || node_state == WfNodeState::Failed)
+                && unwinding
+            {
+                let mut done_tx = tx.clone();
+                let task = tokio::spawn(async move {
+                    /* XXX Clean this up! */
+                    done_tx
+                        .try_send(TaskCompletion {
+                            node_id,
+                            result: Ok(Arc::new(())),
+                        })
+                        .expect("unexpected channel failure");
+                });
+                // XXX Clean this up too
+                live_state.node_make_cancelled(node_id);
+                live_state.node_make_cancelling(node_id, task);
+                live_state
+                    .node_make_state(node_id, WfNodeState::FinishingCancel);
+                continue;
+            }
 
             /*
              * TODO we could be much more efficient without copying this tree
@@ -499,9 +565,11 @@ impl WfExecutor {
             );
 
             /* XXX need a way to get the actual compensation action here! */
+            // XXX shouldn't bother removing from a clone of workflow launchers
+            // -- just reference them directly?
             let wfaction = live_state
                 .launchers
-                .remove(&node_id)
+                .get(&node_id)
                 .expect("missing action for node");
 
             let task_params = TaskParams {
@@ -509,7 +577,7 @@ impl WfExecutor {
                 node_id,
                 done_tx: tx.clone(),
                 ancestor_tree,
-                action: wfaction,
+                action: Arc::clone(wfaction),
                 skip_log_start: node_state == WfNodeState::Starting,
                 unwinding,
             };
@@ -914,8 +982,8 @@ impl WfExecLiveState {
             WfNodeState::Failing => true,
             WfNodeState::Failed => false,
             WfNodeState::StartingCancel => false,
-            WfNodeState::Cancelling => false,
-            WfNodeState::FinishingCancel => false,
+            WfNodeState::Cancelling => true,
+            WfNodeState::FinishingCancel => true,
             WfNodeState::Cancelled => false,
         };
 
@@ -934,7 +1002,17 @@ impl WfExecLiveState {
     }
 
     fn node_make_ready_cancel(&mut self, node_id: NodeIndex) {
-        assert_eq!(self.node_state(node_id), WfNodeState::Done);
+        let node_state = self.node_state(node_id);
+        /*
+         * XXX When we're called from unblock_dependents() during unwinding, it
+         * seems legitimate for this node to be in other states, like "running".
+         * (In that case, we probably shouldn't be called?)
+         */
+        assert!(
+            node_state == WfNodeState::Done
+                || node_state == WfNodeState::Blocked
+                || node_state == WfNodeState::Failed
+        );
         self.ready.push(node_id);
     }
 
