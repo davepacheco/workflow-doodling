@@ -82,12 +82,15 @@ impl fmt::Display for WfNodeState {
 /**
  * Message sent from (tokio) task that executes an action to the executor
  * indicating that the action has completed
- * XXX This should probably be an enum with different values for whether this
- * was a forward execution or a cancellation.
  */
 struct TaskCompletion {
     node_id: NodeIndex,
-    result: WfResult,
+    kind: TaskCompletionKind,
+}
+
+enum TaskCompletionKind {
+    Action(WfResult),
+    Undo,
 }
 
 /**
@@ -388,12 +391,14 @@ impl WfExecutor {
             let node_id = message.node_id;
             let (task, node_state) = {
                 let mut live_state = self.live_state.lock().await;
-                let node_state = *live_state.node_states.get(&node_id).unwrap();
-                if node_state != WfNodeState::FinishingCancel {
-                    live_state.node_make_done(node_id, &message.result);
-                } else {
-                    live_state.node_make_cancelled(node_id);
-                }
+                match &message.kind {
+                    TaskCompletionKind::Undo => {
+                        live_state.node_make_cancelled(node_id);
+                    }
+                    TaskCompletionKind::Action(ref result) => {
+                        live_state.node_make_done(node_id, result);
+                    }
+                };
                 (
                     live_state.node_task_done(node_id),
                     *live_state.node_states.get(&node_id).unwrap(),
@@ -532,7 +537,7 @@ impl WfExecutor {
                     done_tx
                         .try_send(TaskCompletion {
                             node_id,
-                            result: Ok(Arc::new(())),
+                            kind: TaskCompletionKind::Undo,
                         })
                         .expect("unexpected channel failure");
                 });
@@ -635,7 +640,10 @@ impl WfExecutor {
 
         task_params
             .done_tx
-            .try_send(TaskCompletion { node_id, result })
+            .try_send(TaskCompletion {
+                node_id,
+                kind: TaskCompletionKind::Action(result),
+            })
             .expect("unexpected channel failure");
     }
 
@@ -688,7 +696,10 @@ impl WfExecutor {
 
         task_params
             .done_tx
-            .try_send(TaskCompletion { node_id, result: Ok(Arc::new(())) })
+            .try_send(TaskCompletion {
+                node_id,
+                kind: TaskCompletionKind::Undo,
+            })
             .expect("unexpected channel failure");
     }
 
