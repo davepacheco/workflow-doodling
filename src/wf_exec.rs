@@ -33,17 +33,6 @@ use uuid::Uuid;
 /**
  * Execution state for a workflow node
  * TODO ASCII version of the pencil-and-paper diagram?
- * TODO There are several substates not currently used because we have no way to
- * store them in the place they would go.  For example, we want to use
- * "Starting" when we spawn the tokio task to process an action.  And we want to
- * transition to "Running" when we've successfully recorded this action and
- * kicked it off.  However, the state is only stored in the WfExecutor, and we
- * can't mutate that (or even reference it) from the spawned task.  We could
- * send a message over the channel, but then the state update is async and may
- * not reflect reality.  We could use a Mutex, but it feels heavyweight.  Still,
- * that may be the way to go.
- * TODO Several other states are currently unused because we haven't implemented
- * unwinding yet.
  */
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 enum WfNodeState {
@@ -105,6 +94,9 @@ struct TaskCompletion {
  * Context provided to the (tokio) task that executes an action
  */
 struct TaskParams {
+    /** Handle to the workflow itself, used for metadata like the label */
+    workflow: Arc<Workflow>,
+
     /**
      * Handle to the workflow's live state
      *
@@ -564,7 +556,6 @@ impl WfExecutor {
                 unwinding,
             );
 
-            /* XXX need a way to get the actual compensation action here! */
             let wfaction = live_state
                 .workflow
                 .launchers
@@ -572,6 +563,7 @@ impl WfExecutor {
                 .expect("missing action for node");
 
             let task_params = TaskParams {
+                workflow: Arc::clone(&self.workflow),
                 live_state: Arc::clone(&self.live_state),
                 node_id,
                 done_tx: tx.clone(),
@@ -622,6 +614,7 @@ impl WfExecutor {
             ancestor_tree: task_params.ancestor_tree,
             node_id,
             live_state: Arc::clone(&task_params.live_state),
+            workflow: Arc::clone(&task_params.workflow),
         });
         let result = exec_future.await;
         let (event_type, next_state) = if let Ok(ref output) = result {
@@ -671,12 +664,17 @@ impl WfExecutor {
             live_state.node_make_state(node_id, WfNodeState::Cancelling);
         }
 
-        let exec_future = task_params.action.do_it(WfContext {
+        let exec_future = task_params.action.undo_it(WfContext {
             ancestor_tree: task_params.ancestor_tree,
             node_id,
             live_state: Arc::clone(&task_params.live_state),
+            workflow: Arc::clone(&task_params.workflow),
         });
-        exec_future.await;
+        /*
+         * TODO-robustness We have to figure out what it means to fail here and
+         * what we want to do about it.
+         */
+        exec_future.await.unwrap();
         {
             let mut live_state = task_params.live_state.lock().await;
             live_state.node_make_state(node_id, WfNodeState::FinishingCancel);
@@ -1328,6 +1326,7 @@ fn recovery_validate_parent(
 pub struct WfContext {
     ancestor_tree: BTreeMap<String, WfOutput>,
     node_id: NodeIndex,
+    workflow: Arc<Workflow>,
     live_state: Arc<Mutex<WfExecLiveState>>,
 }
 
@@ -1394,5 +1393,9 @@ impl WfContext {
             .or_insert(Vec::new())
             .push(Arc::clone(&e));
         e
+    }
+
+    pub fn node_label(&self) -> &str {
+        self.workflow.node_names.get(&self.node_id).unwrap()
     }
 }

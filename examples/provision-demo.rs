@@ -25,8 +25,8 @@
 
 use std::io;
 use std::sync::Arc;
+use workflow_doodling::new_action_noop_undo;
 use workflow_doodling::recover_workflow_log;
-use workflow_doodling::WfActionFunc;
 use workflow_doodling::WfBuilder;
 use workflow_doodling::WfContext;
 use workflow_doodling::WfExecutor;
@@ -40,28 +40,19 @@ use workflow_doodling::Workflow;
 pub fn make_provision_workflow() -> Arc<Workflow> {
     let mut w = WfBuilder::new();
 
-    w.append(
-        "instance_id",
-        WfActionFunc::new_action(demo_prov_instance_create),
-    );
+    w.append("instance_id", new_action_noop_undo(demo_prov_instance_create));
     w.append_parallel(vec![
-        ("instance_ip", WfActionFunc::new_action(demo_prov_vpc_alloc_ip)),
-        ("volume_id", WfActionFunc::new_action(demo_prov_volume_create)),
-        ("server_id", WfActionFunc::new_action(demo_prov_server_alloc)),
+        ("instance_ip", new_action_noop_undo(demo_prov_vpc_alloc_ip)),
+        ("volume_id", new_action_noop_undo(demo_prov_volume_create)),
+        ("server_id", new_action_noop_undo(demo_prov_server_alloc)),
     ]);
     w.append(
         "instance_configure",
-        WfActionFunc::new_action(demo_prov_instance_configure),
+        new_action_noop_undo(demo_prov_instance_configure),
     );
-    w.append(
-        "volume_attach",
-        WfActionFunc::new_action(demo_prov_volume_attach),
-    );
-    w.append(
-        "instance_boot",
-        WfActionFunc::new_action(demo_prov_instance_boot),
-    );
-    w.append("print", WfActionFunc::new_action(demo_prov_print));
+    w.append("volume_attach", new_action_noop_undo(demo_prov_volume_attach));
+    w.append("instance_boot", new_action_noop_undo(demo_prov_instance_boot));
+    w.append("print", new_action_noop_undo(demo_prov_print));
     Arc::new(w.build())
 }
 
@@ -86,11 +77,8 @@ async fn demo_prov_server_alloc(wfctx: WfContext) -> WfFuncResult {
     eprintln!("allocate server (subworkflow)");
 
     let mut w = WfBuilder::new();
-    w.append("server_id", WfActionFunc::new_action(demo_prov_server_pick));
-    w.append(
-        "server_reserve",
-        WfActionFunc::new_action(demo_prov_server_reserve),
-    );
+    w.append("server_id", new_action_noop_undo(demo_prov_server_pick));
+    w.append("server_reserve", new_action_noop_undo(demo_prov_server_reserve));
     let wf = Arc::new(w.build());
 
     let e = wfctx.child_workflow(wf).await;
@@ -136,7 +124,8 @@ async fn demo_prov_volume_attach(wfctx: WfContext) -> WfFuncResult {
     assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
     assert_eq!(*wfctx.lookup::<u64>("volume_id")?, 1213);
-    Ok(Arc::new(()))
+    // Ok(Arc::new(()))
+    Err(anyhow::anyhow!("injected error"))
 }
 async fn demo_prov_instance_boot(wfctx: WfContext) -> WfFuncResult {
     eprintln!("boot instance");

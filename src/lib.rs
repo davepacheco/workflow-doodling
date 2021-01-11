@@ -76,24 +76,40 @@ pub trait WfAction: Debug + Send + Sync {
      * sharing state across actions within a workflow.
      */
     async fn do_it(&self, wfctx: WfContext) -> WfResult;
+
+    /**
+     * Executes the compensation action for this workflow node, whatever that
+     * is.  TODO document better.
+     */
+    async fn undo_it(&self, wfctx: WfContext) -> Result<(), WfError>;
 }
 
 /**
  * [`WfAction`] implementation for functions
  */
-pub struct WfActionFunc<FutType, FuncType>
-where
-    FuncType: Fn(WfContext) -> FutType + Send + Sync + 'static,
-    FutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
+pub struct WfActionFunc<
+    ActionFutType,
+    ActionFuncType,
+    UndoFutType,
+    UndoFuncType,
+> where
+    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
+    ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
+    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFutType: Future<Output = Result<(), WfError>> + Send + Sync + 'static,
 {
-    func: FuncType,
-    phantom: PhantomData<FutType>,
+    action_func: ActionFuncType,
+    undo_func: UndoFuncType,
+    phantom: PhantomData<(ActionFutType, UndoFutType)>,
 }
 
-impl<FutType, FuncType> WfActionFunc<FutType, FuncType>
+impl<ActionFutType, ActionFuncType, UndoFutType, UndoFuncType>
+    WfActionFunc<ActionFutType, ActionFuncType, UndoFutType, UndoFuncType>
 where
-    FuncType: Fn(WfContext) -> FutType + Send + Sync + 'static,
-    FutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
+    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
+    ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
+    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFutType: Future<Output = Result<(), WfError>> + Send + Sync + 'static,
 {
     /**
      * Wrap a function in a `WfActionFunc`
@@ -103,30 +119,66 @@ where
      * no interfaces of its own so there's generally no need to have the
      * specific type.
      */
-    pub fn new_action(f: FuncType) -> Arc<dyn WfAction> {
-        Arc::new(WfActionFunc { func: f, phantom: PhantomData })
+    pub fn new_action(
+        action_func: ActionFuncType,
+        undo_func: UndoFuncType,
+    ) -> Arc<dyn WfAction> {
+        Arc::new(WfActionFunc { action_func, undo_func, phantom: PhantomData })
     }
 }
 
-#[async_trait]
-impl<FutType, FuncType> WfAction for WfActionFunc<FutType, FuncType>
+/*
+ * TODO-cleanup why can't new_action_noop_undo be in the WfAction namespace?
+ */
+
+async fn undo_noop(wfctx: WfContext) -> Result<(), WfError> {
+    eprintln!("<noop undo for node: \"{}\">", wfctx.node_label());
+    Ok(())
+}
+
+/**
+ * Wrap an action function whose "undo" is a noop.
+ */
+pub fn new_action_noop_undo<ActionFutType, ActionFuncType>(
+    f: ActionFuncType,
+) -> Arc<dyn WfAction>
 where
-    FuncType: Fn(WfContext) -> FutType + Send + Sync + 'static,
-    FutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
+    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
+    ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
+{
+    WfActionFunc::new_action(f, undo_noop)
+}
+
+#[async_trait]
+impl<ActionFutType, ActionFuncType, UndoFutType, UndoFuncType> WfAction
+    for WfActionFunc<ActionFutType, ActionFuncType, UndoFutType, UndoFuncType>
+where
+    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
+    ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
+    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFutType: Future<Output = Result<(), WfError>> + Send + Sync + 'static,
 {
     async fn do_it(&self, wfctx: WfContext) -> WfResult {
-        let fut = { (self.func)(wfctx) };
+        let fut = { (self.action_func)(wfctx) };
+        fut.await
+    }
+
+    async fn undo_it(&self, wfctx: WfContext) -> Result<(), WfError> {
+        let fut = { (self.undo_func)(wfctx) };
         fut.await
     }
 }
 
-impl<FutType, FuncType> Debug for WfActionFunc<FutType, FuncType>
+impl<ActionFutType, ActionFuncType, UndoFutType, UndoFuncType> Debug
+    for WfActionFunc<ActionFutType, ActionFuncType, UndoFutType, UndoFuncType>
 where
-    FuncType: Fn(WfContext) -> FutType + Send + Sync + 'static,
-    FutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
+    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
+    ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
+    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFutType: Future<Output = Result<(), WfError>> + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&std::any::type_name_of_val(&self.func))
+        f.write_str(&std::any::type_name_of_val(&self.action_func))
     }
 }
 
@@ -137,8 +189,15 @@ struct WfActionUniversalStart {}
 #[async_trait]
 impl WfAction for WfActionUniversalStart {
     async fn do_it(&self, _: WfContext) -> WfResult {
-        eprintln!("universal start action");
+        eprintln!("<start workflow>");
         Ok(Arc::new(()))
+    }
+
+    async fn undo_it(&self, _: WfContext) -> Result<(), WfError> {
+        eprintln!(
+            "<undo for \"start\" node: workflow is nearly done unwinding>"
+        );
+        Ok(())
     }
 }
 
@@ -149,8 +208,18 @@ struct WfActionUniversalEnd {}
 #[async_trait]
 impl WfAction for WfActionUniversalEnd {
     async fn do_it(&self, _: WfContext) -> WfResult {
-        eprintln!("universal end action");
+        eprintln!("<action for \"end\" node: workflow is nearly done>");
         Ok(Arc::new(()))
+    }
+
+    async fn undo_it(&self, _: WfContext) -> Result<(), WfError> {
+        /*
+         * We should not run compensation actions for nodes that have not
+         * started.  We should never start this node unless all other actions
+         * have completed.  We should never cancel a workflow unless some action
+         * failed.  Thus, we should never cancel the "end" node in a workflow.
+         */
+        panic!("attempted to cancel end node in workflow");
     }
 }
 
