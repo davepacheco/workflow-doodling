@@ -234,7 +234,7 @@ impl WfExecutor {
         // TODO do we need to send a message on "finish_tx" if the workflow is
         // already done?  Obviously that won't really work here.
         let (finish_tx, _) = broadcast::channel(1);
-        let live_state = recovery.to_live_state(&w, wflog);
+        let live_state = recovery.to_live_state(Arc::clone(&w), wflog);
 
         Ok(WfExecutor {
             workflow: Arc::clone(&w),
@@ -565,9 +565,8 @@ impl WfExecutor {
             );
 
             /* XXX need a way to get the actual compensation action here! */
-            // XXX shouldn't bother removing from a clone of workflow launchers
-            // -- just reference them directly?
             let wfaction = live_state
+                .workflow
                 .launchers
                 .get(&node_id)
                 .expect("missing action for node");
@@ -935,8 +934,7 @@ impl WfExecutor {
  * TODO This would be a good place for a debug log.
  */
 struct WfExecLiveState {
-    /** See [`Workflow::launchers`] */
-    launchers: BTreeMap<NodeIndex, Arc<dyn WfAction>>,
+    workflow: Arc<Workflow>,
 
     /** Overall execution state */
     exec_state: WfState,
@@ -1135,7 +1133,11 @@ impl WfRecovery {
         );
     }
 
-    pub fn to_live_state(self, w: &Workflow, wflog: WfLog) -> WfExecLiveState {
+    pub fn to_live_state(
+        self,
+        workflow: Arc<Workflow>,
+        wflog: WfLog,
+    ) -> WfExecLiveState {
         /*
          * TODO This would be a good time to run some consistency checks.  For
          * example, are there any nodes that have started whose ancestors have
@@ -1148,9 +1150,9 @@ impl WfRecovery {
          * other.  WWe can determine this by looking at the start and end nodes
          * of the graph.
          */
-        let start_state = self.node_state(w.start_node);
+        let start_state = self.node_state(workflow.start_node);
         assert_ne!(start_state, WfNodeState::Blocked);
-        let end_state = self.node_state(w.end_node);
+        let end_state = self.node_state(workflow.end_node);
         /* TODO There are more cases than this. */
         let exec_state = if end_state == WfNodeState::Done {
             /*
@@ -1160,8 +1162,8 @@ impl WfRecovery {
              * "done" record for the end node, we would have found an ancestor
              * that was not also "done".)
              */
-            assert_eq!(self.node_outputs.len(), w.graph.node_count());
-            assert_eq!(self.node_states.len(), w.graph.node_count());
+            assert_eq!(self.node_outputs.len(), workflow.graph.node_count());
+            assert_eq!(self.node_states.len(), workflow.graph.node_count());
             assert!(self.ready.is_empty());
             WfState::Done
         } else {
@@ -1169,7 +1171,7 @@ impl WfRecovery {
         };
 
         WfExecLiveState {
-            launchers: w.launchers.clone(),
+            workflow,
             wflog,
             ready: self.ready,
             exec_state,
