@@ -16,7 +16,6 @@ Major areas to derisk
 TODO
 ----------------------------------------
 
-- Implement unwinding
 - Open questions above
 - Major areas to derisk above
 - Implement Serialize + Deserialize for the WfOutput type.  This isn't necessary at the moment but seems very important to derisk.

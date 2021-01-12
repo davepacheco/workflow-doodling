@@ -9,11 +9,12 @@
  * thoughts about this, some rather rambling.
  */
 
+#![deny(elided_lifetimes_in_paths)]
 #![feature(map_first_last)]
 #![feature(option_expect_none)]
 #![feature(option_unwrap_none)]
+#![feature(or_patterns)]
 #![feature(type_name_of_val)]
-#![deny(elided_lifetimes_in_paths)]
 
 mod wf_exec;
 mod wf_log;

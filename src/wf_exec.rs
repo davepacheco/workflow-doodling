@@ -378,25 +378,27 @@ impl WfExecutor {
                 live_state.wflog.load_status_for_node(node_id.index() as u64);
 
             /*
-             * XXX validate
              * Validate this node's state against its parent nodes' states.  By
              * induction, this validates everything in the graph from the start
-             * node to the current node.
+             * or end node to the current node.
              */
-            // for parent in w.graph.neighbors_directed(node_id, Incoming) {
-            //     let parent_state = recovery.node_state(parent);
-            //     if !recovery_validate_parent(parent_state, node_status) {
-            //         return Err(anyhow!(
-            //             "recovery for workflow {}: node {:?}: \
-            //             load state is \"{:?}\", which is illegal for parent \"
-            //             state \"{}\"",
-            //             workflow_id,
-            //             node_id,
-            //             node_status,
-            //             parent_state,
-            //         ));
-            //     }
-            // }
+            for parent in workflow.graph.neighbors_directed(node_id, Incoming) {
+                let parent_status = live_state
+                    .wflog
+                    .load_status_for_node(parent.index() as u64);
+                if !recovery_validate_parent(parent_status, node_status) {
+                    return Err(anyhow!(
+                        "recovery for workflow {}: node {:?}: \
+                        load status is \"{:?}\", which is illegal for \
+                        parent load status \"{:?}\"",
+                        workflow_id,
+                        node_id,
+                        node_status,
+                        parent_status,
+                    ));
+                }
+            }
+
             let graph = &workflow.graph;
             let direction = if forward {
                 RecoveryDirection::Forward(neighbors_all(
@@ -647,7 +649,8 @@ impl WfExecutor {
             }
         }
 
-        /* XXX trylock, assert state == done */
+        let live_state = self.live_state.try_lock().unwrap();
+        assert_eq!(live_state.exec_state, WfState::Done);
         self.finish_tx.send(()).expect("failed to send finish message");
     }
 
@@ -1225,64 +1228,62 @@ where
     return true;
 }
 
-// /**
-//  * Returns true if the parent node's state is valid for the given child node's
-//  * load status.
-//  */
-// fn recovery_validate_parent(
-//     parent_state: WfNodeState,
-//     child_load_status: &WfNodeLoadStatus,
-// ) -> bool {
-//     match child_load_status {
-//         /*
-//          * If the child node has started, finished successfully, finished with
-//          * an error, or even started cancelling, the only allowed state for the
-//          * parent node is "done".  The states prior to "done" are ruled out
-//          * because we execute nodes in dependency order.  "failing" and "failed"
-//          * are ruled out because we do not execute nodes whose parents failed.
-//          * The cancelling states are ruled out because we cancel in
-//          * reverse-dependency order, so we cannot have started cancelling the
-//          * parent if the child node has not finished cancelling.  (A subtle but
-//          * important implementation detail is that we do not cancel a node that
-//          * has not started execution.  If we did, then the "cancel started" load
-//          * state could be associated with a parent that failed.)
-//          */
-//         WfNodeLoadStatus::Started => parent_state == WfNodeState::Done,
-//         WfNodeLoadStatus::Succeeded(_) => parent_state == WfNodeState::Done,
-//         WfNodeLoadStatus::Failed => parent_state == WfNodeState::Done,
-//         WfNodeLoadStatus::CancelStarted => parent_state == WfNodeState::Done,
-//
-//         /*
-//          * If we've finished cancelling the child node, then the parent must be
-//          * either "done" or one of the cancelling states.
-//          */
-//         WfNodeLoadStatus::CancelFinished => match parent_state {
-//             WfNodeState::Done => true,
-//             WfNodeState::StartingCancel => true,
-//             WfNodeState::Cancelling => true,
-//             WfNodeState::FinishingCancel => true,
-//             WfNodeState::Cancelled => true,
-//             _ => false,
-//         },
-//
-//         /*
-//          * If a node has never started, the only illegal states for a parent are
-//          * those associated with cancelling, since the child must be cancelled
-//          * first.
-//          */
-//         WfNodeLoadStatus::NeverStarted => match parent_state {
-//             WfNodeState::Blocked => true,
-//             WfNodeState::Ready => true,
-//             WfNodeState::Starting => true,
-//             WfNodeState::Running => true,
-//             WfNodeState::Finishing => true,
-//             WfNodeState::Done => true,
-//             WfNodeState::Failing => true,
-//             WfNodeState::Failed => true,
-//             _ => false,
-//         },
-//     }
-// }
+/**
+ * Returns true if the parent node's load status is valid for the given child
+ * node's load status.
+ */
+fn recovery_validate_parent(
+    parent_status: &WfNodeLoadStatus,
+    child_status: &WfNodeLoadStatus,
+) -> bool {
+    match (child_status, parent_status) {
+        /*
+         * If the child node has started, finished successfully, finished with
+         * an error, or even started cancelling, the only allowed status for the
+         * parent node is "done".  The states prior to "done" are ruled out
+         * because we execute nodes in dependency order.  "failed" is ruled out
+         * because we do not execute nodes whose parents failed.  The cancelling
+         * states are ruled out because we cancel in reverse-dependency order,
+         * so we cannot have started cancelling the parent if the child node has
+         * not finished cancelling.  (A subtle but important implementation
+         * detail is that we do not cancel a node that has not started
+         * execution.  If we did, then the "cancel started" load state could be
+         * associated with a parent that failed.)
+         */
+        (
+            WfNodeLoadStatus::Started
+            | WfNodeLoadStatus::Succeeded(_)
+            | WfNodeLoadStatus::Failed
+            | WfNodeLoadStatus::CancelStarted,
+            WfNodeLoadStatus::Succeeded(_),
+        ) => true,
+
+        /*
+         * If we've finished cancelling the child node, then the parent must be
+         * either "done" or one of the cancelling states.
+         */
+        (
+            WfNodeLoadStatus::CancelFinished,
+            WfNodeLoadStatus::Succeeded(_)
+            | WfNodeLoadStatus::CancelStarted
+            | WfNodeLoadStatus::CancelFinished,
+        ) => true,
+
+        /*
+         * If a node has never started, the only illegal states for a parent are
+         * those associated with cancelling, since the child must be cancelled
+         * first.
+         */
+        (
+            WfNodeLoadStatus::NeverStarted,
+            WfNodeLoadStatus::NeverStarted
+            | WfNodeLoadStatus::Started
+            | WfNodeLoadStatus::Succeeded(_)
+            | WfNodeLoadStatus::Failed,
+        ) => true,
+        _ => false,
+    }
+}
 
 /**
  * Action's handle to the workflow subsystem
