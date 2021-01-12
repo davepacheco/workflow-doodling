@@ -215,11 +215,75 @@ impl WfNodeRest for WfNode<WfnsCancelled> {
                  * action, we change the implementing struct to an
                  * implementation that runs the undo action.
                  */
-                todo!("cancel ancestor node");
+                /*
+                 * We're ready to cancel "parent".  We don't know whether it's
+                 * finished running, on the todo queue, or currenting
+                 * outstanding.  (It should not be on the undo queue!)
+                 * XXX Here's an awful approach just intended to let us flesh
+                 * out more of the rest of this to better understand how to
+                 * manage state.
+                 */
+                match live_state.node_exec_state(&parent) {
+                    WfNodeExecState::Blocked | WfNodeExecState::Failed => {
+                        /*
+                         * If the node never started or if it failed, we can
+                         * just mark it cancelled without doing anything else.
+                         */
+                        let new_node =
+                            WfNode { node_id: parent, state: WfnsCancelled };
+                        new_node.propagate(exec, live_state);
+                        continue;
+                    }
+
+                    WfNodeExecState::QueuedToRun
+                    | WfNodeExecState::TaskInProgress => {
+                        /*
+                         * If we're running an action for this task, there's
+                         * nothing we can do right now, but we'll handle it when
+                         * it finishes.  We could do better with queued (and
+                         * there's an XXX in kick_off_ready() to do so), but
+                         * this isn't wrong as-is.
+                         */
+                        continue;
+                    }
+
+                    WfNodeExecState::Done => {
+                        /*
+                         * We have to actually run the undo action.
+                         */
+                        live_state.queue_undo.push(parent);
+                    }
+
+                    WfNodeExecState::QueuedToUndo
+                    | WfNodeExecState::Cancelled => {
+                        panic!(
+                            "already cancelling or cancelled node \
+                            whose child was just now cancelled"
+                        );
+                    }
+                }
             }
         }
     }
 }
+
+// XXX
+// trait WfNodeCancellable {
+//     fn cancel(&self, exec: &WfExecutor, live_state: &mut WfExecLiveState);
+// }
+//
+// impl WfNodeCancellable for WfNode<WfnsBlocked>
+// impl WfNodeCancellable for WfNode<WfnsReady >
+// impl WfNodeCancellable for WfNode<WfnsStarting >
+// impl WfNodeCancellable for WfNode<WfnsRunning >
+// impl WfNodeCancellable for WfNode<WfnsFinishing >
+// impl WfNodeCancellable for WfNode<WfnsDone >
+// impl WfNodeCancellable for WfNode<WfnsFailing >
+// impl WfNodeCancellable for WfNode<WfnsFailed >
+// impl WfNodeCancellable for WfNode<WfnsStartingCancel >
+// impl WfNodeCancellable for WfNode<WfnsCancelling >
+// impl WfNodeCancellable for WfNode<WfnsFinishingCancel >
+// impl WfNodeCancellable for WfNode<WfnsCancelled >
 
 // XXX
 // /**
@@ -1098,7 +1162,57 @@ struct WfExecLiveState {
     wflog: WfLog,
 }
 
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum WfNodeExecState {
+    Blocked,
+    QueuedToRun,
+    TaskInProgress,
+    Done,
+    Failed,
+    QueuedToUndo,
+    Cancelled,
+}
+
 impl WfExecLiveState {
+    /* XXX This is an awful function, I think. */
+    fn node_exec_state(&self, node_id: &NodeIndex) -> WfNodeExecState {
+        /*
+         * This seems like overkill but it seems helpful to validate state.
+         */
+        let mut set: BTreeSet<WfNodeExecState> = BTreeSet::new();
+        if self.nodes_cancelled.contains(node_id) {
+            set.insert(WfNodeExecState::Cancelled);
+        }
+        if self.node_outputs.contains_key(node_id) {
+            set.insert(WfNodeExecState::Done);
+        }
+        if self.node_tasks.contains_key(node_id) {
+            set.insert(WfNodeExecState::TaskInProgress);
+        }
+        if self.queue_todo.contains(node_id) {
+            set.insert(WfNodeExecState::QueuedToRun);
+        }
+        if self.queue_undo.contains(node_id) {
+            set.insert(WfNodeExecState::QueuedToUndo);
+        }
+        /* XXX This is janky. */
+        let load_status =
+            self.wflog.load_status_for_node(node_id.index() as u64);
+        if let WfNodeLoadStatus::Failed = load_status {
+            set.insert(WfNodeExecState::Failed);
+        }
+        if let Some(the_state) = set.pop_first() {
+            assert!(set.is_empty());
+            the_state
+        } else {
+            if let WfNodeLoadStatus::NeverStarted = load_status {
+                WfNodeExecState::Blocked
+            } else {
+                panic!("could not determine node state");
+            }
+        }
+    }
+
     fn mark_workflow_done(&mut self) {
         assert!(self.queue_todo.is_empty());
         assert!(self.queue_undo.is_empty());

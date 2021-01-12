@@ -9,9 +9,10 @@
  * thoughts about this, some rather rambling.
  */
 
-#![feature(type_name_of_val)]
+#![feature(map_first_last)]
 #![feature(option_expect_none)]
 #![feature(option_unwrap_none)]
+#![feature(type_name_of_val)]
 #![deny(elided_lifetimes_in_paths)]
 
 mod wf_exec;
@@ -189,13 +190,13 @@ struct WfActionUniversalStart {}
 #[async_trait]
 impl WfAction for WfActionUniversalStart {
     async fn do_it(&self, _: WfContext) -> WfResult {
-        eprintln!("<start workflow>");
+        eprintln!("<action for \"start\" node>");
         Ok(Arc::new(()))
     }
 
     async fn undo_it(&self, _: WfContext) -> Result<(), WfError> {
         eprintln!(
-            "<undo for \"start\" node: workflow is nearly done unwinding>"
+            "<undo for \"start\" node (workflow is nearly done unwinding)>"
         );
         Ok(())
     }
