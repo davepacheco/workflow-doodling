@@ -124,8 +124,7 @@ async fn demo_prov_volume_attach(wfctx: WfContext) -> WfFuncResult {
     assert_eq!(*wfctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(*wfctx.lookup::<u64>("server_id")?, 1212);
     assert_eq!(*wfctx.lookup::<u64>("volume_id")?, 1213);
-    // Ok(Arc::new(()))
-    Err(anyhow::anyhow!("injected error"))
+    Ok(Arc::new(()))
 }
 async fn demo_prov_instance_boot(wfctx: WfContext) -> WfFuncResult {
     eprintln!("boot instance");
