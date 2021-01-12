@@ -266,6 +266,9 @@ struct TaskParams {
      */
     live_state: Arc<Mutex<WfExecLiveState>>,
 
+    // TODO-cleanup should not need a copy here.
+    creator: String,
+
     /** id of the graph node whose action we're running */
     node_id: NodeIndex,
     /** channel over which to send completion message */
@@ -294,6 +297,8 @@ pub struct WfExecutor {
     // TODO This could probably be a reference instead.
     workflow: Arc<Workflow>,
 
+    creator: String,
+
     /** Channel for monitoring execution completion */
     finish_tx: broadcast::Sender<()>,
 
@@ -315,12 +320,10 @@ enum RecoveryDirection {
 
 impl WfExecutor {
     /** Create an executor to run the given workflow. */
-    pub fn new(w: Arc<Workflow>) -> WfExecutor {
+    pub fn new(w: Arc<Workflow>, creator: &str) -> WfExecutor {
         let workflow_id = Uuid::new_v4();
-        // TODO "myself" here should be a hostname or other identifier for this
-        // instance.
-        let wflog = WfLog::new("myself", workflow_id);
-        WfExecutor::new_recover(w, wflog).unwrap()
+        let wflog = WfLog::new(creator, workflow_id);
+        WfExecutor::new_recover(w, wflog, creator).unwrap()
     }
 
     /**
@@ -330,6 +333,7 @@ impl WfExecutor {
     pub fn new_recover(
         workflow: Arc<Workflow>,
         wflog: WfLog,
+        creator: &str,
     ) -> Result<WfExecutor, WfError> {
         /*
          * During recovery, there's a fine line between operational errors and
@@ -519,6 +523,7 @@ impl WfExecutor {
 
         Ok(WfExecutor {
             workflow,
+            creator: creator.to_owned(),
             workflow_id,
             finish_tx,
             live_state: Arc::new(Mutex::new(live_state)),
@@ -704,6 +709,7 @@ impl WfExecutor {
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
                 action: Arc::clone(wfaction),
+                creator: self.creator.clone(),
             };
 
             let task = tokio::spawn(WfExecutor::exec_node(task_params));
@@ -745,6 +751,7 @@ impl WfExecutor {
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
                 action: Arc::clone(wfaction),
+                creator: self.creator.clone(),
             };
 
             let task = tokio::spawn(WfExecutor::undo_node(task_params));
@@ -793,6 +800,7 @@ impl WfExecutor {
             node_id,
             live_state: Arc::clone(&task_params.live_state),
             workflow: Arc::clone(&task_params.workflow),
+            creator: task_params.creator.clone(),
         });
         let result = exec_future.await;
         let node: Box<dyn WfNodeRest> = match result {
@@ -844,6 +852,7 @@ impl WfExecutor {
             node_id,
             live_state: Arc::clone(&task_params.live_state),
             workflow: Arc::clone(&task_params.workflow),
+            creator: task_params.creator.clone(),
         });
         /*
          * TODO-robustness We have to figure out what it means to fail here and
@@ -1291,6 +1300,8 @@ pub struct WfContext {
     node_id: NodeIndex,
     workflow: Arc<Workflow>,
     live_state: Arc<Mutex<WfExecLiveState>>,
+    /* TODO-cleanup should not need a copy here */
+    creator: String,
 }
 
 impl WfContext {
@@ -1346,7 +1357,7 @@ impl WfContext {
          * we'd like to give details on this child workflow.  Similarly if they
          * pause the parent, that should pause the child one.
          */
-        let e = Arc::new(WfExecutor::new(wf));
+        let e = Arc::new(WfExecutor::new(wf, &self.creator));
         /* TODO-correctness Prove the lock ordering is okay here .*/
         self.live_state
             .lock()

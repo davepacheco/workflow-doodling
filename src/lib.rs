@@ -246,10 +246,7 @@ pub struct Workflow {
 impl Debug for Workflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let dot = petgraph::dot::Dot::new(&self.graph);
-        f.debug_struct("Workflow")
-            .field("graph", &self.graph)
-            .field("dot", &dot)
-            .finish()
+        write!(f, "workflow graph: {:?}", dot)
     }
 }
 
