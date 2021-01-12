@@ -31,10 +31,10 @@ pub enum WfNodeEventType {
     Succeeded(WfOutput),
     /** The action failed */
     Failed,
-    /** The cancel action has started running */
-    CancelStarted,
-    /** The cancel action has finished */
-    CancelFinished,
+    /** The undo action has started running */
+    UndoStarted,
+    /** The undo action has finished */
+    UndoFinished,
 }
 
 impl fmt::Display for WfNodeEventType {
@@ -43,8 +43,8 @@ impl fmt::Display for WfNodeEventType {
             WfNodeEventType::Started => "started",
             WfNodeEventType::Succeeded(_) => "succeeded",
             WfNodeEventType::Failed => "failed",
-            WfNodeEventType::CancelStarted => "cancel started",
-            WfNodeEventType::CancelFinished => "cancel finished",
+            WfNodeEventType::UndoStarted => "undo started",
+            WfNodeEventType::UndoFinished => "undo finished",
         })
     }
 }
@@ -71,10 +71,10 @@ pub enum WfNodeLoadStatus {
     Succeeded(WfOutput),
     /** The action failed */
     Failed,
-    /** The cancel action has started running */
-    CancelStarted,
-    /** The cancel action has finished */
-    CancelFinished,
+    /** The undo action has started running */
+    UndoStarted,
+    /** The undo action has finished */
+    UndoFinished,
 }
 
 impl WfNodeLoadStatus {
@@ -93,17 +93,15 @@ impl WfNodeLoadStatus {
             (WfNodeLoadStatus::Started, WfNodeEventType::Failed) => {
                 Ok(WfNodeLoadStatus::Failed)
             }
-            (
-                WfNodeLoadStatus::Succeeded(_),
-                WfNodeEventType::CancelStarted,
-            ) => Ok(WfNodeLoadStatus::CancelStarted),
-            (WfNodeLoadStatus::Failed, WfNodeEventType::CancelStarted) => {
-                Ok(WfNodeLoadStatus::CancelStarted)
+            (WfNodeLoadStatus::Succeeded(_), WfNodeEventType::UndoStarted) => {
+                Ok(WfNodeLoadStatus::UndoStarted)
             }
-            (
-                WfNodeLoadStatus::CancelStarted,
-                WfNodeEventType::CancelFinished,
-            ) => Ok(WfNodeLoadStatus::CancelFinished),
+            (WfNodeLoadStatus::Failed, WfNodeEventType::UndoStarted) => {
+                Ok(WfNodeLoadStatus::UndoStarted)
+            }
+            (WfNodeLoadStatus::UndoStarted, WfNodeEventType::UndoFinished) => {
+                Ok(WfNodeLoadStatus::UndoFinished)
+            }
             _ => Err(anyhow!(
                 "workflow node with status \"{:?}\": event \"{}\" is illegal",
                 self,
@@ -206,8 +204,8 @@ impl WfLog {
 
         match next_status {
             WfNodeLoadStatus::Failed
-            | WfNodeLoadStatus::CancelStarted
-            | WfNodeLoadStatus::CancelFinished => {
+            | WfNodeLoadStatus::UndoStarted
+            | WfNodeLoadStatus::UndoFinished => {
                 self.unwinding = true;
             }
             _ => (),
@@ -295,8 +293,8 @@ pub fn recover_workflow_log(
         WfNodeEventType::Started => 1,
         WfNodeEventType::Succeeded(_) => 2,
         WfNodeEventType::Failed => 3,
-        WfNodeEventType::CancelStarted => 4,
-        WfNodeEventType::CancelFinished => 5,
+        WfNodeEventType::UndoStarted => 4,
+        WfNodeEventType::UndoFinished => 5,
     });
 
     /*

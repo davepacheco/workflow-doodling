@@ -24,8 +24,7 @@ TODO
 - There's also a ton of cleanup to do here.
   - Lots of TODOs
   - Reconsider:
-    - naming (Workflow vs. WorkflowExecution?  Sagas?).  Maybe rename cancel ->
-      undo?
+    - naming (Workflow vs. WorkflowExecution?  Sagas?).
     - prefixes (Wf prefix on most things)
     - what's exported publicly
     - what code is in what files
@@ -114,7 +113,7 @@ futures: mpsc, oneshot
 async-channel: https://crates.io/crates/async-channel
 tokio: broadcast channel
 
-This makes sense.  It's not yet totally clear to me how we manage cancellation in this case, but I guess we create another future for this node that does something similar to the above.
+This makes sense.  It's not yet totally clear to me how we manage cancellation/undo in this case, but I guess we create another future for this node that does something similar to the above.
 
 (The bulk of the orchestration is now happening by some other Executor)
 
@@ -212,3 +211,14 @@ Open items from distributed saga log:
 
 NOTE: this has implication for the shared in-memory state between nodes.  It
 needs to be reconstituted from the log.
+
+Some terminology differences:
+
+- what DS calls "request", we call "action".  ("Request" has a lot of other
+  baggage, like RPC or HTTP request.  This is _not_ necessarily one of those, or
+  it may be 10 of them.)
+- what DS calls abort, we call fail (so it's not confused with something that
+  more closely resembles "undo")
+- what DS calls cancel, we call undo (so it's not confused with something that
+  more closely resembles "stop")
+- what DS calls "compensating request", we call "undo action"

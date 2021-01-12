@@ -54,8 +54,8 @@ pub type WfOutput = Arc<dyn Any + Send + Sync + 'static>;
 pub type WfResult = Result<WfOutput, WfError>;
 /** Result of a function implementing a workflow action */
 pub type WfFuncResult = Result<WfOutput, WfError>;
-/** Result of a workflow cancel action. */
-pub type WfCancelResult = Result<(), WfError>;
+/** Result of a workflow undo action. */
+pub type WfUndoResult = Result<(), WfError>;
 
 /**
  * Building blocks of workflows
@@ -85,7 +85,7 @@ pub trait WfAction: Debug + Send + Sync {
      * Executes the compensation action for this workflow node, whatever that
      * is.
      */
-    async fn undo_it(&self, wfctx: WfContext) -> WfCancelResult;
+    async fn undo_it(&self, wfctx: WfContext) -> WfUndoResult;
 }
 
 /**
@@ -100,7 +100,7 @@ pub struct WfActionFunc<
     ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
     UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = WfCancelResult> + Send + Sync + 'static,
+    UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
 {
     action_func: ActionFuncType,
     undo_func: UndoFuncType,
@@ -113,7 +113,7 @@ where
     ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
     UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = WfCancelResult> + Send + Sync + 'static,
+    UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
 {
     /**
      * Wrap a function in a `WfActionFunc`
@@ -135,7 +135,7 @@ where
  * TODO-cleanup why can't new_action_noop_undo be in the WfAction namespace?
  */
 
-async fn undo_noop(wfctx: WfContext) -> WfCancelResult {
+async fn undo_noop(wfctx: WfContext) -> WfUndoResult {
     eprintln!("<noop undo for node: \"{}\">", wfctx.node_label());
     Ok(())
 }
@@ -160,14 +160,14 @@ where
     ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
     UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = WfCancelResult> + Send + Sync + 'static,
+    UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
 {
     async fn do_it(&self, wfctx: WfContext) -> WfResult {
         let fut = { (self.action_func)(wfctx) };
         fut.await
     }
 
-    async fn undo_it(&self, wfctx: WfContext) -> WfCancelResult {
+    async fn undo_it(&self, wfctx: WfContext) -> WfUndoResult {
         let fut = { (self.undo_func)(wfctx) };
         fut.await
     }
@@ -179,7 +179,7 @@ where
     ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
     UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = WfCancelResult> + Send + Sync + 'static,
+    UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&std::any::type_name_of_val(&self.action_func))
@@ -197,7 +197,7 @@ impl WfAction for WfActionUniversalStart {
         Ok(Arc::new(()))
     }
 
-    async fn undo_it(&self, _: WfContext) -> WfCancelResult {
+    async fn undo_it(&self, _: WfContext) -> WfUndoResult {
         eprintln!(
             "<undo for \"start\" node (workflow is nearly done unwinding)>"
         );
@@ -216,14 +216,14 @@ impl WfAction for WfActionUniversalEnd {
         Ok(Arc::new(()))
     }
 
-    async fn undo_it(&self, _: WfContext) -> WfCancelResult {
+    async fn undo_it(&self, _: WfContext) -> WfUndoResult {
         /*
          * We should not run compensation actions for nodes that have not
          * started.  We should never start this node unless all other actions
-         * have completed.  We should never cancel a workflow unless some action
-         * failed.  Thus, we should never cancel the "end" node in a workflow.
+         * have completed.  We should never unwind a workflow unless some action
+         * failed.  Thus, we should never undo the "end" node in a workflow.
          */
-        panic!("attempted to cancel end node in workflow");
+        panic!("attempted to undo end node in workflow");
     }
 }
 
