@@ -34,29 +34,13 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 /*
- * XXX Working here
- * I'm working on a rewrite using the typestate pattern described by Cliff's
- * blog, also similar to what's described by the hoverbear blog post on state
- * machines.
- * XXX Next steps:
- * - update state printing?
- * - clean up XXXs
- * XXX Should we go even further and say that each node is its own struct with
- * incoming channels from parents (to notify when done), from children (to
- * notify when cancelled), and to each direction as well?  Then the whole thing
- * is a message passing exercise?
+ * TODO-design Should we go even further and say that each node is its own
+ * struct with incoming channels from parents (to notify when done), from
+ * children (to notify when cancelled), and to each direction as well?  Then the
+ * whole thing is a message passing exercise?
  */
-struct WfnsBlocked;
-struct WfnsReady;
-struct WfnsStarting;
-struct WfnsRunning;
-struct WfnsFinishing;
 struct WfnsDone(WfOutput);
-struct WfnsFailing;
 struct WfnsFailed(WfError);
-struct WfnsStartingCancel;
-struct WfnsCancelling;
-struct WfnsFinishingCancel;
 struct WfnsCancelled;
 
 struct WfNode<S: WfNodeStateType> {
@@ -65,20 +49,11 @@ struct WfNode<S: WfNodeStateType> {
 }
 
 trait WfNodeStateType {}
-impl WfNodeStateType for WfnsBlocked {}
-impl WfNodeStateType for WfnsReady {}
-impl WfNodeStateType for WfnsStarting {}
-impl WfNodeStateType for WfnsRunning {}
-impl WfNodeStateType for WfnsFinishing {}
 impl WfNodeStateType for WfnsDone {}
-impl WfNodeStateType for WfnsFailing {}
 impl WfNodeStateType for WfnsFailed {}
-impl WfNodeStateType for WfnsStartingCancel {}
-impl WfNodeStateType for WfnsCancelling {}
-impl WfNodeStateType for WfnsFinishingCancel {}
 impl WfNodeStateType for WfnsCancelled {}
 
-/* XXX Is this right?  Is the trait supposed to be empty? */
+/* TODO-design Is this right?  Is the trait supposed to be empty? */
 trait WfNodeRest: Send + Sync {
     fn propagate(&self, exec: &WfExecutor, live_state: &mut WfExecLiveState);
     fn log_event(&self) -> WfNodeEventType;
@@ -205,25 +180,12 @@ impl WfNodeRest for WfNode<WfnsCancelled> {
                 live_state.nodes_cancelled.contains(child)
             }) {
                 /*
-                 * XXX problem here is that while we know that the next step is
-                 * to cancel this node, we don't know whether we need to run the
-                 * "undo" action or if we can just move it straight to
-                 * "cancelled".  We haven't recorded state about this.
-                 *
-                 * One possibility is that we maintain a tree of nodes into
-                 * which we insert a Cancelable trait when we start running them
-                 * (or recover them in this state).  The "cancel" function does
-                 * the appropriate thing.  If/when the thing finishes its
-                 * action, we change the implementing struct to an
-                 * implementation that runs the undo action.
-                 */
-                /*
                  * We're ready to cancel "parent".  We don't know whether it's
                  * finished running, on the todo queue, or currenting
                  * outstanding.  (It should not be on the undo queue!)
-                 * XXX Here's an awful approach just intended to let us flesh
-                 * out more of the rest of this to better understand how to
-                 * manage state.
+                 * TODO-design Here's an awful approach just intended to let us
+                 * flesh out more of the rest of this to better understand how
+                 * to manage state.
                  */
                 match live_state.node_exec_state(&parent) {
                     WfNodeExecState::Blocked | WfNodeExecState::Failed => {
@@ -243,8 +205,8 @@ impl WfNodeRest for WfNode<WfnsCancelled> {
                          * If we're running an action for this task, there's
                          * nothing we can do right now, but we'll handle it when
                          * it finishes.  We could do better with queued (and
-                         * there's an XXX in kick_off_ready() to do so), but
-                         * this isn't wrong as-is.
+                         * there's a TODO-design in kick_off_ready() to do so),
+                         * but this isn't wrong as-is.
                          */
                         continue;
                     }
@@ -269,27 +231,6 @@ impl WfNodeRest for WfNode<WfnsCancelled> {
     }
 }
 
-// XXX
-// /**
-//  * Execution state for a workflow node
-//  * TODO ASCII version of the pencil-and-paper diagram?
-//  */
-// #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-// enum WfNodeState {
-//     Blocked,
-//     Ready,
-//     Starting,
-//     Running,
-//     Finishing,
-//     Done,
-//     Failing,
-//     Failed,
-//     StartingCancel,
-//     Cancelling,
-//     FinishingCancel,
-//     Cancelled,
-// }
-
 /**
  * Execution state for the workflow overall
  */
@@ -299,26 +240,6 @@ enum WfState {
     Unwinding,
     Done,
 }
-
-// XXX
-// impl fmt::Display for WfNodeState {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         f.write_str(match self {
-//             WfNodeState::Blocked => "blocked",
-//             WfNodeState::Ready => "ready",
-//             WfNodeState::Starting => "starting",
-//             WfNodeState::Running => "running",
-//             WfNodeState::Finishing => "finishing",
-//             WfNodeState::Done => "done",
-//             WfNodeState::Failing => "failing",
-//             WfNodeState::Failed => "failed",
-//             WfNodeState::StartingCancel => "starting_cancel",
-//             WfNodeState::Cancelling => "cancelling",
-//             WfNodeState::FinishingCancel => "finishing_cancel",
-//             WfNodeState::Cancelled => "cancelled",
-//         })
-//     }
-// }
 
 /**
  * Message sent from (tokio) task that executes an action to the executor
@@ -457,7 +378,7 @@ impl WfExecutor {
                 live_state.wflog.load_status_for_node(node_id.index() as u64);
 
             /*
-             * XXX XXX validate
+             * XXX validate
              * Validate this node's state against its parent nodes' states.  By
              * induction, this validates everything in the graph from the start
              * node to the current node.
@@ -516,9 +437,9 @@ impl WfExecutor {
                              * (unwinding) whose children have all been
                              * cancelled and which has never started.  Just mark
                              * it cancelled.
-                             * XXX Does this suggest a better way to do this
-                             * might be to simply load all the state that we
-                             * have into the WfExecLiveState and execute the
+                             * TODO-design Does this suggest a better way to do
+                             * this might be to simply load all the state that
+                             * we have into the WfExecLiveState and execute the
                              * workflow as normal, but have normal execution
                              * check for cached values instead of running
                              * actions?  In a sense, this makes the recovery
@@ -541,8 +462,6 @@ impl WfExecutor {
                     /*
                      * Whether we're unwinding or not, we have to finish
                      * execution of this action.
-                     * XXX need to record that the "start" log entry was already
-                     * there.
                      */
                     live_state.queue_todo.push(node_id);
                 }
@@ -576,8 +495,6 @@ impl WfExecutor {
                     /*
                      * We know we're unwinding. (Otherwise, we should have
                      * failed validation earlier.)  Execute the undo action.
-                     * XXX need to record that the "start cancel" log entry was
-                     * already there.
                      */
                     assert!(!forward);
                     live_state.queue_undo.push(node_id);
@@ -756,7 +673,7 @@ impl WfExecutor {
 
         for node_id in todo_queue {
             /*
-             * XXX It would be good to check whether the workflow is
+             * TODO-design It would be good to check whether the workflow is
              * unwinding, and if so, whether this action has ever started
              * running before.  If not, then we can send this straight to
              * cancelling without doing any more work here.  What we're
@@ -893,9 +810,9 @@ impl WfExecutor {
      * Body of a (tokio) task that executes a compensation action.
      */
     /*
-     * XXX This has a lot in common with exec_node(), but enough different that
-     * it doesn't make sense to parametrize that one.  Still, it sure would be
-     * nice to clean this up.
+     * TODO-cleanup This has a lot in common with exec_node(), but enough
+     * different that it doesn't make sense to parametrize that one.  Still, it
+     * sure would be nice to clean this up.
      */
     async fn cancel_node(task_params: TaskParams) {
         let node_id = task_params.node_id;
@@ -1178,13 +1095,21 @@ impl fmt::Display for WfNodeExecState {
 }
 
 impl WfExecLiveState {
-    /* XXX This is an awful function, I think. */
+    /*
+     * TODO-design The current implementation does not use explicit state.  In
+     * most cases, this made things better than before because each hunk of code
+     * was structured to accept only nodes in states that were valid.  But
+     * there are a few cases where we need a bit more state than we're currently
+     * keeping.  This function is used there.
+     *
+     * It's especially questionable to use load_status here -- or is that the
+     * way we should go more generally?  See TODO-design in new_recover().
+     */
     fn node_exec_state(&self, node_id: &NodeIndex) -> WfNodeExecState {
         /*
          * This seems like overkill but it seems helpful to validate state.
          */
         let mut set: BTreeSet<WfNodeExecState> = BTreeSet::new();
-        /* XXX Use of load status is janky. */
         let load_status =
             self.wflog.load_status_for_node(node_id.index() as u64);
         if self.nodes_cancelled.contains(node_id) {
