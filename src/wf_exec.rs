@@ -26,6 +26,7 @@ use petgraph::Incoming;
 use petgraph::Outgoing;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fmt;
 use std::io;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -38,8 +39,8 @@ use uuid::Uuid;
  * blog, also similar to what's described by the hoverbear blog post on state
  * machines.
  * XXX Next steps:
- * - updating recovery process -- see new_recover().
  * - update state printing?
+ * - clean up XXXs
  * XXX Should we go even further and say that each node is its own struct with
  * incoming channels from parents (to notify when done), from children (to
  * notify when cancelled), and to each direction as well?  Then the whole thing
@@ -267,45 +268,6 @@ impl WfNodeRest for WfNode<WfnsCancelled> {
         }
     }
 }
-
-//trait WfNodeExecReady {
-//    const log_event: Option<WfNodeEventType>;
-//    fn next_node(&self, node: Box<dyn WfNode>) -> Box<dyn WfNode>;
-//}
-//
-//impl WfNodeExecReady for WfNode<WfnsReady> {
-//    const log_event: WfNodeEventType = Some(WfNodeEventType::Started);
-//    fn next_node(&self, node: WfNode<Self>) -> Box<dyn WfNodeExecRunning> {
-//        Box::new(WfNode {
-//            node_id: self.node_id,
-//            state: WfnsStarting
-//        })
-//    }
-//}
-//
-//impl WfNodeExecReady for WfNode<WfnsStarting> {
-//    const log_event: WfNodeEventType = None;
-//    fn next_node(&self, node: WfNode<Self>) -> Box<dyn WfNodeExecRunning> {
-//        Box::new(WfNode {
-//            node_id: self.node_id,
-//            state: WfnsRunning
-//        })
-//    }
-//}
-
-// XXX need an analogous state for the cancelling case
-// XXX need one for Started too
-
-// impl WfNodeExecReady for WfNode<WfnsStarting >
-// impl WfNodeExecReady for WfNode<WfnsRunning >
-// impl WfNodeExecReady for WfNode<WfnsFinishing >
-// impl WfNodeExecReady for WfNode<WfnsDone >
-// impl WfNodeExecReady for WfNode<WfnsFailing >
-// impl WfNodeExecReady for WfNode<WfnsFailed >
-// impl WfNodeExecReady for WfNode<WfnsStartingCancel >
-// impl WfNodeExecReady for WfNode<WfnsCancelling >
-// impl WfNodeExecReady for WfNode<WfnsFinishingCancel >
-// impl WfNodeExecReady for WfNode<WfnsCancelled >
 
 // XXX
 // /**
@@ -1106,13 +1068,13 @@ impl WfExecutor {
                 if nodes.len() == 1 {
                     let node = nodes[0];
                     let node_name = &self.workflow.node_names[&node];
-                    let node_state = "unknown"; // XXX update
+                    let node_state = live_state.node_exec_state(&node);
                     write!(out, "{}: {}\n", node_state, node_name)?;
                 } else {
                     write!(out, "+ (actions in parallel)\n")?;
                     for node in nodes {
                         let node_name = &self.workflow.node_names[&node];
-                        let node_state = "unknown"; // XXX update
+                        let node_state = live_state.node_exec_state(&node);
                         let child_workflows =
                             live_state.child_workflows.get(&node);
                         let subworkflow_char =
@@ -1201,6 +1163,20 @@ enum WfNodeExecState {
     Cancelled,
 }
 
+impl fmt::Display for WfNodeExecState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            WfNodeExecState::Blocked => "blocked",
+            WfNodeExecState::QueuedToRun => "queued-todo",
+            WfNodeExecState::TaskInProgress => "working",
+            WfNodeExecState::Done => "done",
+            WfNodeExecState::Failed => "failed",
+            WfNodeExecState::QueuedToUndo => "queued-undo",
+            WfNodeExecState::Cancelled => "undone",
+        })
+    }
+}
+
 impl WfExecLiveState {
     /* XXX This is an awful function, I think. */
     fn node_exec_state(&self, node_id: &NodeIndex) -> WfNodeExecState {
@@ -1208,11 +1184,15 @@ impl WfExecLiveState {
          * This seems like overkill but it seems helpful to validate state.
          */
         let mut set: BTreeSet<WfNodeExecState> = BTreeSet::new();
+        /* XXX Use of load status is janky. */
+        let load_status =
+            self.wflog.load_status_for_node(node_id.index() as u64);
         if self.nodes_cancelled.contains(node_id) {
             set.insert(WfNodeExecState::Cancelled);
-        }
-        if self.node_outputs.contains_key(node_id) {
+        } else if self.node_outputs.contains_key(node_id) {
             set.insert(WfNodeExecState::Done);
+        } else if let WfNodeLoadStatus::Failed = load_status {
+            set.insert(WfNodeExecState::Failed);
         }
         if self.node_tasks.contains_key(node_id) {
             set.insert(WfNodeExecState::TaskInProgress);
@@ -1222,12 +1202,6 @@ impl WfExecLiveState {
         }
         if self.queue_undo.contains(node_id) {
             set.insert(WfNodeExecState::QueuedToUndo);
-        }
-        /* XXX This is janky. */
-        let load_status =
-            self.wflog.load_status_for_node(node_id.index() as u64);
-        if let WfNodeLoadStatus::Failed = load_status {
-            set.insert(WfNodeExecState::Failed);
         }
         if let Some(the_state) = set.pop_first() {
             assert!(set.is_empty());
