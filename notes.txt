@@ -12,10 +12,17 @@ Major areas to derisk
   Workflow step fails in a way that demands reversal of the workflow, then we
   carry that out?  And how do we determine whether errors within subworkflows
   demand that the parent workflow also be reversed?
+- Integration into oxide-api-prototype
 
 TODO
 ----------------------------------------
 
+- Get to something demo-able:
+  - add first-class ability to inject failure
+  - kind of want an interactive shell.  does that make sense though?  maybe just
+    have a couple of different example programs.
+  - add a way to write the log to a file and read it back.  That will help
+    experiment more.
 - Open questions above
 - Major areas to derisk above
 - Implement Serialize + Deserialize for the WfOutput type.  This isn't necessary at the moment but seems very important to derisk.
