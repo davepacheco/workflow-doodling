@@ -10,13 +10,7 @@ use workflow_doodling::WfExecutor;
 async fn main() {
     let mut stderr = io::stderr();
     let w = make_provision_workflow();
-    eprintln!("*** workflow definition ***");
-    eprintln!("{:?}", w);
-
-    eprintln!("*** initial state ***");
     let e = WfExecutor::new(Arc::clone(&w), "provision-demo");
-    e.print_status(&mut stderr, 0).await.unwrap();
-
     eprintln!("\n*** running workflow ***");
     e.run().await;
     eprintln!("*** finished workflow ***");

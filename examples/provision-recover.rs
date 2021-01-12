@@ -13,9 +13,6 @@ use workflow_doodling::WfLog;
 async fn main() {
     let mut stderr = io::stderr();
     let w = make_provision_workflow();
-    eprintln!("*** workflow definition ***");
-    eprintln!("{:?}", w);
-
     /* Run the workflow once. */
     eprintln!("*** running workflow to generate a complete log ***");
     let e = WfExecutor::new(Arc::clone(&w), "provision-demo");
@@ -27,7 +24,7 @@ async fn main() {
     events.truncate(9);
     let mut wflog = WfLog::new("example", result.wflog.workflow_id);
     recover_workflow_log(&mut wflog, events).unwrap();
-    eprintln!("*** recovering from the following log: ***");
+    eprintln!("*** recovering from the following trimmed log: ***");
     eprintln!("{:?}", wflog);
     let e = WfExecutor::new_recover(Arc::clone(&w), wflog, "provision-demo")
         .unwrap();
