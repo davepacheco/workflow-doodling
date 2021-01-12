@@ -20,6 +20,7 @@ mod example_provision;
 mod wf_exec;
 mod wf_log;
 
+use anyhow::anyhow;
 use async_trait::async_trait;
 use core::any::Any;
 use core::fmt;
@@ -226,6 +227,27 @@ impl WfAction for WfActionUniversalEnd {
          * failed.  Thus, we should never undo the "end" node in a workflow.
          */
         panic!("attempted to undo end node in workflow");
+    }
+}
+
+/** Action implementation that simulates an error at a given stage. */
+#[derive(Debug)]
+struct WfActionInjectError {}
+
+#[async_trait]
+impl WfAction for WfActionInjectError {
+    async fn do_it(&self, wfctx: WfContext) -> WfResult {
+        let message = format!(
+            "<boom! error injected instead of action for \
+            node \"{}\">",
+            wfctx.node_label()
+        );
+        eprintln!("{}", message);
+        Err(anyhow!("{}", message))
+    }
+
+    async fn undo_it(&self, _: WfContext) -> WfUndoResult {
+        unimplemented!();
     }
 }
 

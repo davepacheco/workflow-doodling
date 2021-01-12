@@ -3,6 +3,7 @@
 use crate::wf_log::WfNodeEventType;
 use crate::wf_log::WfNodeLoadStatus;
 use crate::WfAction;
+use crate::WfActionInjectError;
 use crate::WfError;
 use crate::WfId;
 use crate::WfLog;
@@ -357,6 +358,7 @@ impl WfExecutor {
             nodes_undone: BTreeSet::new(),
             child_workflows: BTreeMap::new(),
             wflog: wflog,
+            injected_errors: BTreeSet::new(),
         };
         let mut loaded = BTreeSet::new();
 
@@ -581,6 +583,24 @@ impl WfExecutor {
         self.make_ancestor_tree(tree, live_state, node, false);
     }
 
+    pub async fn inject_error(&self, node_name: &str) {
+        /* First, find the node with that name. */
+        let mut maybe_node_id: Option<NodeIndex> = None;
+        for (node, name) in &self.workflow.node_names {
+            if name == node_name {
+                maybe_node_id = Some(*node);
+                break;
+            }
+        }
+
+        if let Some(node_id) = maybe_node_id {
+            let mut live_state = self.live_state.lock().await;
+            live_state.injected_errors.insert(node_id);
+        } else {
+            panic!("no such node in workflow: \"{}\"", node_name);
+        }
+    }
+
     /**
      * Wrapper for WfLog.record_now() that maps internal node indexes to stable
      * node ids.
@@ -696,11 +716,17 @@ impl WfExecutor {
                 false,
             );
 
-            let wfaction = live_state
-                .workflow
-                .launchers
-                .get(&node_id)
-                .expect("missing action for node");
+            let wfaction = if live_state.injected_errors.contains(&node_id) {
+                Arc::new(WfActionInjectError {}) as Arc<dyn WfAction>
+            } else {
+                Arc::clone(
+                    live_state
+                        .workflow
+                        .launchers
+                        .get(&node_id)
+                        .expect("missing action for node"),
+                )
+            };
 
             let task_params = TaskParams {
                 workflow: Arc::clone(&self.workflow),
@@ -708,7 +734,7 @@ impl WfExecutor {
                 node_id,
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
-                action: Arc::clone(wfaction),
+                action: wfaction,
                 creator: self.creator.clone(),
             };
 
@@ -1075,6 +1101,9 @@ struct WfExecLiveState {
 
     /** Persistent state */
     wflog: WfLog,
+
+    /** Injected errors */
+    injected_errors: BTreeSet<NodeIndex>,
 }
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]

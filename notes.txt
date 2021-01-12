@@ -18,11 +18,15 @@ TODO
 ----------------------------------------
 
 - Get to something demo-able:
-  - add first-class ability to inject failure
-  - kind of want an interactive shell.  does that make sense though?  maybe just
-    have a couple of different example programs.
   - add a way to write the log to a file and read it back.  That will help
     experiment more.
+  - maybe make a single command-line tool with subcommands:
+    - dump workflow
+    - run workflow
+      - option: inject error at stage <X>
+      - option: dump log when done
+      - option: recover from log X
+      - option: set creator to X
 - Open questions above
 - Major areas to derisk above
 - Implement Serialize + Deserialize for the WfOutput type.  This isn't necessary at the moment but seems very important to derisk.
