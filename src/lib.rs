@@ -16,6 +16,7 @@
 #![feature(or_patterns)]
 #![feature(type_name_of_val)]
 
+mod example_provision;
 mod wf_exec;
 mod wf_log;
 
@@ -31,6 +32,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+pub use example_provision::make_provision_workflow;
 pub use wf_exec::WfContext;
 pub use wf_exec::WfExecutor;
 pub use wf_log::recover_workflow_log;
