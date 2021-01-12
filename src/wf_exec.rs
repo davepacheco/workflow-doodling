@@ -77,6 +77,7 @@ impl WfNodeStateType for WfnsCancelling {}
 impl WfNodeStateType for WfnsFinishingCancel {}
 impl WfNodeStateType for WfnsCancelled {}
 
+/* XXX Is this right?  Is the trait supposed to be empty? */
 trait WfNodeRest: Send + Sync {
     fn propagate(&self, exec: &WfExecutor, live_state: &mut WfExecLiveState);
     fn log_event(&self) -> WfNodeEventType;
@@ -267,23 +268,44 @@ impl WfNodeRest for WfNode<WfnsCancelled> {
     }
 }
 
-// XXX
-// trait WfNodeCancellable {
-//     fn cancel(&self, exec: &WfExecutor, live_state: &mut WfExecLiveState);
-// }
+//trait WfNodeExecReady {
+//    const log_event: Option<WfNodeEventType>;
+//    fn next_node(&self, node: Box<dyn WfNode>) -> Box<dyn WfNode>;
+//}
 //
-// impl WfNodeCancellable for WfNode<WfnsBlocked>
-// impl WfNodeCancellable for WfNode<WfnsReady >
-// impl WfNodeCancellable for WfNode<WfnsStarting >
-// impl WfNodeCancellable for WfNode<WfnsRunning >
-// impl WfNodeCancellable for WfNode<WfnsFinishing >
-// impl WfNodeCancellable for WfNode<WfnsDone >
-// impl WfNodeCancellable for WfNode<WfnsFailing >
-// impl WfNodeCancellable for WfNode<WfnsFailed >
-// impl WfNodeCancellable for WfNode<WfnsStartingCancel >
-// impl WfNodeCancellable for WfNode<WfnsCancelling >
-// impl WfNodeCancellable for WfNode<WfnsFinishingCancel >
-// impl WfNodeCancellable for WfNode<WfnsCancelled >
+//impl WfNodeExecReady for WfNode<WfnsReady> {
+//    const log_event: WfNodeEventType = Some(WfNodeEventType::Started);
+//    fn next_node(&self, node: WfNode<Self>) -> Box<dyn WfNodeExecRunning> {
+//        Box::new(WfNode {
+//            node_id: self.node_id,
+//            state: WfnsStarting
+//        })
+//    }
+//}
+//
+//impl WfNodeExecReady for WfNode<WfnsStarting> {
+//    const log_event: WfNodeEventType = None;
+//    fn next_node(&self, node: WfNode<Self>) -> Box<dyn WfNodeExecRunning> {
+//        Box::new(WfNode {
+//            node_id: self.node_id,
+//            state: WfnsRunning
+//        })
+//    }
+//}
+
+// XXX need an analogous state for the cancelling case
+// XXX need one for Started too
+
+// impl WfNodeExecReady for WfNode<WfnsStarting >
+// impl WfNodeExecReady for WfNode<WfnsRunning >
+// impl WfNodeExecReady for WfNode<WfnsFinishing >
+// impl WfNodeExecReady for WfNode<WfnsDone >
+// impl WfNodeExecReady for WfNode<WfnsFailing >
+// impl WfNodeExecReady for WfNode<WfnsFailed >
+// impl WfNodeExecReady for WfNode<WfnsStartingCancel >
+// impl WfNodeExecReady for WfNode<WfnsCancelling >
+// impl WfNodeExecReady for WfNode<WfnsFinishingCancel >
+// impl WfNodeExecReady for WfNode<WfnsCancelled >
 
 // XXX
 // /**
@@ -373,8 +395,6 @@ struct TaskParams {
     ancestor_tree: Arc<BTreeMap<String, WfOutput>>,
     /** The action itself that we're executing. */
     action: Arc<dyn WfAction>,
-    /** Skip logging the "start" record (if this is a restart) */
-    skip_log_start: bool,
 }
 
 /**
@@ -806,16 +826,6 @@ impl WfExecutor {
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
                 action: Arc::clone(wfaction),
-                /*
-                 * XXX need to skip log start if we've ever logged that before
-                 * This (and several related issues) might be addressed with a
-                 * new node state and trait (like ExecStart) that would include
-                 * this new state, the existing Ready, and analogous ones for
-                 * Cancel.  Then we could pass a Box<dyn ExecStart> along, and
-                 * it could provide a log_event() similar to what we do for
-                 * finish_task().
-                 */
-                skip_log_start: false,
             };
 
             let task = tokio::spawn(WfExecutor::exec_node(task_params));
@@ -857,10 +867,6 @@ impl WfExecutor {
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
                 action: Arc::clone(wfaction),
-                /*
-                 * XXX need to skip log start if we've ever logged that before
-                 */
-                skip_log_start: false,
             };
 
             let task = tokio::spawn(WfExecutor::cancel_node(task_params));
@@ -883,13 +889,24 @@ impl WfExecutor {
              * design.
              */
             let mut live_state = task_params.live_state.lock().await;
-            if !task_params.skip_log_start {
-                WfExecutor::record_now(
-                    &mut live_state.wflog,
-                    node_id,
-                    WfNodeEventType::Started,
-                )
-                .await;
+            let load_status =
+                live_state.wflog.load_status_for_node(node_id.index() as u64);
+            match load_status {
+                WfNodeLoadStatus::NeverStarted => {
+                    WfExecutor::record_now(
+                        &mut live_state.wflog,
+                        node_id,
+                        WfNodeEventType::Started,
+                    )
+                    .await;
+                }
+                WfNodeLoadStatus::Started => (),
+                WfNodeLoadStatus::Succeeded(_)
+                | WfNodeLoadStatus::Failed
+                | WfNodeLoadStatus::CancelStarted
+                | WfNodeLoadStatus::CancelFinished => {
+                    panic!("starting node in bad state")
+                }
             }
         }
 
@@ -923,13 +940,24 @@ impl WfExecutor {
 
         {
             let mut live_state = task_params.live_state.lock().await;
-            if !task_params.skip_log_start {
-                WfExecutor::record_now(
-                    &mut live_state.wflog,
-                    node_id,
-                    WfNodeEventType::CancelStarted,
-                )
-                .await;
+            let load_status =
+                live_state.wflog.load_status_for_node(node_id.index() as u64);
+            match load_status {
+                WfNodeLoadStatus::Succeeded(_) => {
+                    WfExecutor::record_now(
+                        &mut live_state.wflog,
+                        node_id,
+                        WfNodeEventType::CancelStarted,
+                    )
+                    .await;
+                }
+                WfNodeLoadStatus::CancelStarted => (),
+                WfNodeLoadStatus::NeverStarted
+                | WfNodeLoadStatus::Started
+                | WfNodeLoadStatus::Failed
+                | WfNodeLoadStatus::CancelFinished => {
+                    panic!("cancelling node in bad state")
+                }
             }
         }
 
