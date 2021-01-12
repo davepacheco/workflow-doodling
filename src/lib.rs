@@ -33,7 +33,6 @@ use uuid::Uuid;
 
 pub use wf_exec::WfContext;
 pub use wf_exec::WfExecutor;
-// TODO Probably don't need to be public, actually
 pub use wf_log::recover_workflow_log;
 pub use wf_log::WfLog;
 pub use wf_log::WfLogResult;
@@ -41,14 +40,17 @@ pub use wf_log::WfLogResult;
 /* Widely-used types (within workflows) */
 
 /** Unique identifier for a Workflow */
-// TODO Should this have "w-" prefix like other clouds use?
+/*
+ * TODO-cleanup make this a "newtype".  We may want the display form to have a
+ * "w-" prefix (or something like that).  (Does that mean the type needs to be
+ * caller-provided?)
+ */
 pub type WfId = Uuid;
 /** Error produced by a workflow action or a workflow itself */
 pub type WfError = anyhow::Error;
 /** Output produced on success by a workflow action or the workflow itself */
 pub type WfOutput = Arc<dyn Any + Send + Sync + 'static>;
 /** Result of a workflow action or the workflow itself */
-// pub type WfResult = Arc<Result<WfOutput, WfError>>;
 pub type WfResult = Result<WfOutput, WfError>;
 /** Result of a function implementing a workflow action */
 pub type WfFuncResult = Result<WfOutput, WfError>;
@@ -81,9 +83,9 @@ pub trait WfAction: Debug + Send + Sync {
 
     /**
      * Executes the compensation action for this workflow node, whatever that
-     * is.  TODO document better.
+     * is.
      */
-    async fn undo_it(&self, wfctx: WfContext) -> Result<(), WfError>;
+    async fn undo_it(&self, wfctx: WfContext) -> WfCancelResult;
 }
 
 /**
@@ -98,7 +100,7 @@ pub struct WfActionFunc<
     ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
     UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = Result<(), WfError>> + Send + Sync + 'static,
+    UndoFutType: Future<Output = WfCancelResult> + Send + Sync + 'static,
 {
     action_func: ActionFuncType,
     undo_func: UndoFuncType,
@@ -111,7 +113,7 @@ where
     ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
     UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = Result<(), WfError>> + Send + Sync + 'static,
+    UndoFutType: Future<Output = WfCancelResult> + Send + Sync + 'static,
 {
     /**
      * Wrap a function in a `WfActionFunc`
@@ -133,7 +135,7 @@ where
  * TODO-cleanup why can't new_action_noop_undo be in the WfAction namespace?
  */
 
-async fn undo_noop(wfctx: WfContext) -> Result<(), WfError> {
+async fn undo_noop(wfctx: WfContext) -> WfCancelResult {
     eprintln!("<noop undo for node: \"{}\">", wfctx.node_label());
     Ok(())
 }
@@ -158,14 +160,14 @@ where
     ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
     UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = Result<(), WfError>> + Send + Sync + 'static,
+    UndoFutType: Future<Output = WfCancelResult> + Send + Sync + 'static,
 {
     async fn do_it(&self, wfctx: WfContext) -> WfResult {
         let fut = { (self.action_func)(wfctx) };
         fut.await
     }
 
-    async fn undo_it(&self, wfctx: WfContext) -> Result<(), WfError> {
+    async fn undo_it(&self, wfctx: WfContext) -> WfCancelResult {
         let fut = { (self.undo_func)(wfctx) };
         fut.await
     }
@@ -177,7 +179,7 @@ where
     ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType: Future<Output = WfFuncResult> + Send + Sync + 'static,
     UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = Result<(), WfError>> + Send + Sync + 'static,
+    UndoFutType: Future<Output = WfCancelResult> + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&std::any::type_name_of_val(&self.action_func))
@@ -195,7 +197,7 @@ impl WfAction for WfActionUniversalStart {
         Ok(Arc::new(()))
     }
 
-    async fn undo_it(&self, _: WfContext) -> Result<(), WfError> {
+    async fn undo_it(&self, _: WfContext) -> WfCancelResult {
         eprintln!(
             "<undo for \"start\" node (workflow is nearly done unwinding)>"
         );
@@ -214,7 +216,7 @@ impl WfAction for WfActionUniversalEnd {
         Ok(Arc::new(()))
     }
 
-    async fn undo_it(&self, _: WfContext) -> Result<(), WfError> {
+    async fn undo_it(&self, _: WfContext) -> WfCancelResult {
         /*
          * We should not run compensation actions for nodes that have not
          * started.  We should never start this node unless all other actions
@@ -233,8 +235,6 @@ impl WfAction for WfActionUniversalEnd {
  */
 pub struct Workflow {
     graph: Graph<String, ()>,
-    // TODO Maybe the WfExec should just have a reference to the workflow rather
-    // than needing Arc<dyn WfAction> and copying these other fields.
     launchers: BTreeMap<NodeIndex, Arc<dyn WfAction>>,
     node_names: BTreeMap<NodeIndex, String>,
     start_node: NodeIndex,
@@ -365,11 +365,6 @@ impl WfBuilder {
     }
 
     /** Finishes building the Workflow */
-    /*
-     * TODO it's not clear if it's important that this step exist.  Maybe some
-     * workflows could append to themselves while they're running, and that
-     * might be okay?
-     */
     pub fn build(mut self) -> Workflow {
         /*
          * Append an "end" node so that we can easily tell when the workflow has

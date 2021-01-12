@@ -1,6 +1,4 @@
 //! Persistent state for workflows
-//! This implementation is heavily inspired by McCaffrey's work on Distributed
-//! Sagas.  See README for details.  TODO write that README.
 
 use crate::WfError;
 use crate::WfId;
@@ -62,7 +60,6 @@ impl fmt::Display for WfNodeEventType {
  *
  * A node's status is very nearly identified by the type of the last event seen.
  * It's cleaner to have a first-class summary here.
- * TODO refer to the functions that ingest a list of events.
  */
 #[derive(Debug, Clone)]
 pub enum WfNodeLoadStatus {
@@ -151,14 +148,16 @@ impl fmt::Debug for WfNodeEvent {
 /**
  * Write to a workflow's log
  */
-// TODO This structure is used both for writing to the log and recovering the
-// log.  There are some similarities.  However, it might be useful to enforce
-// that you're only doing one of these at a time by having these by separate
-// types, with the recovery one converting into WfLog when you're done with
-// recovery.
+/*
+ * TODO-cleanup This structure is used both for writing to the log and
+ * recovering the log.  There are some similarities.  However, it might be
+ * useful to enforce that you're only doing one of these at a time by having
+ * these by separate types, with the recovery one converting into WfLog when
+ * you're done with recovery.
+ */
 #[derive(Clone)]
 pub struct WfLog {
-    // TODO include version here
+    /* TODO-robustness include version here */
     pub workflow_id: WfId,
     pub unwinding: bool,
     creator: String,
@@ -254,7 +253,11 @@ impl fmt::Debug for WfLog {
 
 /**
  * Reconstruct a workflow's persistent log state
- * TODO Something about this being a standalone function feels odd.
+ *
+ * # Panics
+ *
+ * If `wflog` has already recorded any events or if any of the provided
+ * workflow events do not belong to the same workflow named in `wflog`.
  */
 pub fn recover_workflow_log(
     wflog: &mut WfLog,
@@ -281,11 +284,11 @@ pub fn recover_workflow_log(
      */
     events.sort_by_key(|f| match f.event_type {
         /*
-         * TODO Is there a better way to do this?  We want to sort by the event
-         * type, where event types are compared by the order they're defined in
-         * WfEventType.  We could almost use derived PartialOrd and PartialEq
-         * implementations for WfEventType, except that one variant has a
-         * payload that does _not_ necessarily implement PartialEq or
+         * TODO-cleanup Is there a better way to do this?  We want to sort by
+         * the event type, where event types are compared by the order they're
+         * defined in WfEventType.  We could almost use derived PartialOrd and
+         * PartialEq implementations for WfEventType, except that one variant
+         * has a payload that does _not_ necessarily implement PartialEq or
          * PartialOrd.  It seems like that means we have to implement this by
          * hand.
          */
@@ -312,6 +315,6 @@ pub fn recover_workflow_log(
 }
 
 //
-// TODO lots of automated tests are possible here, but let's see if the
+// TODO-testing lots of automated tests are possible here, but let's see if the
 // abstraction makes any sense first.
 //

@@ -34,6 +34,7 @@ TODO
   Maybe if we first-class `WfActionWorkflow`, the framework can ensure that
   this is done idempotently.
 - Features:
+  - inject failure at node X
   - pausing, "breakpoints", step through, etc. (thought: create a common
     "wait" function.  Arguments describe the event (e.g., starting action for
     node X).  In pause mode, it checks a condition and decides whether to
@@ -63,6 +64,10 @@ TODO
     input/output types as we do today.  But maybe when it's still in the
     builder stage, we keep track of these types so that we can fail at
     compile time when constructing an invalid graph.
+- Even if we skip the static typing: the interface for constructing a workflow
+  DAG feels like it needs work.
+- Write README, to include reference to McCaffrey's talk
+- Review public interface and documentation
 
 What exists so far
 -------------------
