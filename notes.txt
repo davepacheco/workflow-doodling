@@ -18,9 +18,6 @@ TODO
 ----------------------------------------
 
 - Get to something demo-able:
-  - in progress: add a way to write the log to a file
-    - todo: tweak output (event types should be snake_case)
-  - todo: add a way to read it back
   - todo: make a single command-line tool with subcommands:
     - dump workflow
     - run workflow
@@ -79,6 +76,7 @@ TODO
   DAG feels like it needs work.
 - Write README, to include reference to McCaffrey's talk
 - Review public interface and documentation
+- Revisit serialization of log.  The event_type enum seems odd.
 
 What exists so far
 -------------------

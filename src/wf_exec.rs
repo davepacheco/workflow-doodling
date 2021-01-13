@@ -4,9 +4,9 @@ use crate::wf_log::WfNodeEventType;
 use crate::wf_log::WfNodeLoadStatus;
 use crate::WfAction;
 use crate::WfActionInjectError;
+use crate::WfActionOutput;
 use crate::WfActionResult;
 use crate::WfError;
-use crate::WfActionOutput;
 use crate::WfId;
 use crate::WfLog;
 use crate::Workflow;
@@ -522,6 +522,15 @@ impl WfExecutor {
             assert!(loaded.insert(node_id));
         }
 
+        /*
+         * Check our done conditions.
+         */
+        if live_state.node_outputs.contains_key(&workflow.end_node)
+            || live_state.nodes_undone.contains(&workflow.start_node)
+        {
+            live_state.mark_workflow_done();
+        }
+
         let (finish_tx, _) = broadcast::channel(1);
 
         Ok(WfExecutor {
@@ -626,11 +635,20 @@ impl WfExecutor {
      * one that has been recovered from persistent state.
      */
     async fn run_workflow(&self) {
-        // TODO how to check this?  do we want to take the lock?  Note that it's
-        // not obvious it will be Running here -- consider the recovery case.
-        // TODO It would also be nice every time we block on the channel to
-        // assert that there are outstanding operations.
-        // assert_eq!(self.exec_state, WfState::Running);
+        {
+            /*
+             * TODO-design Every WfExec should be able to run_workflow() exactly
+             * once.  We don't really want to let you re-run it and get a new
+             * message on finish_tx.  However, we _do_ want to handle this
+             * particular case when we've recovered a "done" workflow and the
+             * consumer has run() it (once).
+             */
+            let live_state = self.live_state.lock().await;
+            if live_state.exec_state == WfState::Done{
+                self.finish_tx.send(()).expect("failed to send finish message");
+                return;
+            }
+        }
 
         /*
          * Allocate the channel used for node tasks to tell us when they've
@@ -649,6 +667,8 @@ impl WfExecutor {
              * It shouldn't be possible to get None back here.  That would mean
              * that all of the consumers have closed their ends, but we still
              * have a consumer of our own in "tx".
+             * TODO-robustness Can we assert that there are outstanding tasks
+             * when we block on this channel?
              */
             let message = rx.next().await.expect("broken tx");
             let task = {
@@ -743,7 +763,7 @@ impl WfExecutor {
             live_state.node_task(node_id, task);
         }
 
-        if live_state.exec_state == WfState::Done {
+        if live_state.exec_state == WfState::Running {
             assert!(live_state.queue_undo.is_empty());
             return;
         }
@@ -1238,10 +1258,11 @@ impl WfExecResult {
             name
         ));
         // TODO-cleanup double-asterisk seems ridiculous
-        let parsed: T = serde_json::from_value((**item).clone()).expect(&format!(
-            "requested wrong type for output of node with name \"{}\"",
-            name
-        ));
+        let parsed: T =
+            serde_json::from_value((**item).clone()).expect(&format!(
+                "requested wrong type for output of node with name \"{}\"",
+                name
+            ));
         Ok(parsed)
     }
 }

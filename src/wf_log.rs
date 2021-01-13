@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Read;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -27,6 +28,7 @@ pub type WfLogResult = Result<(), WfError>;
  * error details and other debugging state.
  */
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WfNodeEventType {
     /** The action has started running */
     Started,
@@ -230,7 +232,9 @@ impl WfLog {
         &self.events
     }
 
+    // TODO-blocking
     pub fn dump<W: Write>(&self, writer: W) -> Result<(), anyhow::Error> {
+        /* TODO-cleanup can we avoid these clones? */
         let s = WfLogSerialized {
             workflow_id: self.workflow_id,
             creator: self.creator.clone(),
@@ -240,6 +244,25 @@ impl WfLog {
         serde_json::to_writer_pretty(writer, &s).with_context(|| {
             format!("serializing log for workflow {}", self.workflow_id)
         })
+    }
+
+    pub fn recover<R: Read>(reader: R) -> Result<WfLog, anyhow::Error> {
+        let s: WfLogSerialized = serde_json::from_reader(reader)
+            .with_context(|| "deserializing workflow log")?;
+        let mut wflog = WfLog::new(&s.creator, s.workflow_id);
+        for e in &s.events {
+            if e.workflow_id != s.workflow_id {
+                return Err(anyhow!(
+                    "found an event in the log for a \
+                    different workflow ({}) than the log's header ({})",
+                    e.workflow_id,
+                    s.workflow_id
+                ));
+            }
+        }
+
+        recover_workflow_log(&mut wflog, s.events)?;
+        Ok(wflog)
     }
 }
 
@@ -279,6 +302,7 @@ impl fmt::Debug for WfLog {
  *
  * If `wflog` has already recorded any events or if any of the provided
  * workflow events do not belong to the same workflow named in `wflog`.
+ * XXX make this non-public
  */
 pub fn recover_workflow_log(
     wflog: &mut WfLog,
