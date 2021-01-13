@@ -51,14 +51,13 @@ pub use wf_log::WfLogResult;
  * "w-" prefix (or something like that).  (Does that mean the type needs to be
  * caller-provided?)
  */
-// XXX audit all these to see what's still used and if it makes sense
 pub type WfId = Uuid;
 /** Error produced by a workflow action or a workflow itself */
 pub type WfError = anyhow::Error;
 /** Result of a function implementing a workflow action */
 pub type WfFuncResult<T> = Result<T, WfError>;
 /** Result of a function implementing a workflow action */
-// XXX can we drop this Arc?
+// TODO-cleanup can we drop this Arc?
 pub type WfActionResult = Result<Arc<JsonValue>, WfError>;
 /** Result of a workflow undo action. */
 pub type WfUndoResult = Result<(), WfError>;

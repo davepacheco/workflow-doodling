@@ -7,9 +7,12 @@ use anyhow::Context;
 use chrono::DateTime;
 use chrono::SecondsFormat;
 use chrono::Utc;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Write;
 use std::sync::Arc;
 
 pub type WfNodeId = u64;
@@ -23,7 +26,7 @@ pub type WfLogResult = Result<(), WfError>;
  * TODO We might still want to put more information here, like the failure
  * error details and other debugging state.
  */
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum WfNodeEventType {
     /** The action has started running */
     Started,
@@ -61,7 +64,7 @@ impl fmt::Display for WfNodeEventType {
  * A node's status is very nearly identified by the type of the last event seen.
  * It's cleaner to have a first-class summary here.
  */
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum WfNodeLoadStatus {
     /** The action never started running */
     NeverStarted,
@@ -114,7 +117,7 @@ impl WfNodeLoadStatus {
 /**
  * An entry in the workflow log
  */
-#[derive(Clone)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct WfNodeEvent {
     /** id of the workflow */
     workflow_id: WfId,
@@ -226,6 +229,26 @@ impl WfLog {
     pub fn events(&self) -> &Vec<WfNodeEvent> {
         &self.events
     }
+
+    pub fn dump<W: Write>(&self, writer: W) -> Result<(), anyhow::Error> {
+        let s = WfLogSerialized {
+            workflow_id: self.workflow_id,
+            creator: self.creator.clone(),
+            events: self.events.clone(),
+        };
+
+        serde_json::to_writer_pretty(writer, &s).with_context(|| {
+            format!("serializing log for workflow {}", self.workflow_id)
+        })
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct WfLogSerialized {
+    /* TODO-robustness add version */
+    workflow_id: WfId,
+    creator: String,
+    events: Vec<WfNodeEvent>,
 }
 
 impl fmt::Debug for WfLog {
