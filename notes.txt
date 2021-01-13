@@ -17,19 +17,11 @@ Major areas to derisk
 TODO
 ----------------------------------------
 
-- Get to something demo-able:
-  - todo: make a single command-line tool with subcommands:
-    - dump workflow
-    - run workflow
-      - option: inject error at stage <X>
-      - option: dump log when done
-      - option: recover from log X
-      - option: set creator to X
+- Prepare for demo
+  - add human-readable label that's separate from the name
+  - Write README, to include reference to McCaffrey's talk
 - Open questions above
 - Major areas to derisk above
-- Implement Serialize + Deserialize for the WfOutput type.  This isn't necessary at the moment but seems very important to derisk.
-  see: https://github.com/dtolnay/typetag/issues/1
-  see notes from Cliff
 - There's also a ton of cleanup to do here.
   - Lots of TODOs
   - Reconsider:
@@ -42,20 +34,21 @@ TODO
   Maybe if we first-class `WfActionWorkflow`, the framework can ensure that
   this is done idempotently.
 - Features:
-  - inject failure at node X
   - pausing, "breakpoints", step through, etc. (thought: create a common
     "wait" function.  Arguments describe the event (e.g., starting action for
     node X).  In pause mode, it checks a condition and decides whether to
     wait.  In "step" mode, it decrements a semaphore.  In normal mode, it
     does nothing.)
+    - could add CLI tool that runs up to a breakpoint and exits (optionally
+      dumps log).  Could then add a "step" version.
   - concurrency limit
   - canarying
   - blast radius?
   - policy around what to do on failure (stop, rewind)
   - Allow workflow execution to consume parameters
-- It should be easier to define functions that _don't_ record any persistent
-  state (to avoid having to assign a name and to avoid the boilerplate of
-  Ok(Arc::new(()))
+  - It could be easier to define functions that _don't_ record any persistent
+    state (to avoid having to assign a name and to avoid the boilerplate of
+    Ok(Arc::new(()))
 - Revisit static typing in the construction and execution of the graph?
   - See notes from Cliff below.
   - Probably: this isn't so much input/output for each function, but a set of
@@ -74,7 +67,6 @@ TODO
     compile time when constructing an invalid graph.
 - Even if we skip the static typing: the interface for constructing a workflow
   DAG feels like it needs work.
-- Write README, to include reference to McCaffrey's talk
 - Review public interface and documentation
 - Revisit serialization of log.  The event_type enum seems odd.
 

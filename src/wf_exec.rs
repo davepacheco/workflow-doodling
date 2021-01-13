@@ -1359,11 +1359,7 @@ impl WfContext {
      * the previous action stored.  We would enforce this at compile time if we
      * could.
      */
-    // XXX why is this a Result?
-    pub fn lookup<T: WfActionOutput + 'static>(
-        &self,
-        name: &str,
-    ) -> Result<T, WfError> {
+    pub fn lookup<T: WfActionOutput + 'static>(&self, name: &str) -> T {
         let item = self
             .ancestor_tree
             .get(name)
@@ -1371,7 +1367,7 @@ impl WfContext {
         // TODO-cleanup double-asterisk seems ridiculous
         let specific_item = serde_json::from_value((**item).clone())
             .expect(&format!("ancestor \"{}\" produced unexpected type", name));
-        Ok(specific_item)
+        specific_item
     }
 
     /**

@@ -261,7 +261,6 @@ impl WfLog {
         let mut s: WfLogSerialized = serde_json::from_reader(reader)
             .with_context(|| "deserializing workflow log")?;
         let mut wflog = WfLog::new(&creator, s.workflow_id);
-        for e in &s.events {}
 
         /*
          * Sort the events by the event type.  This ensures that if there's at

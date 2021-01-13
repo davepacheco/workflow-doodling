@@ -67,7 +67,7 @@ async fn demo_prov_instance_create(_wfctx: WfContext) -> WfFuncResult<u64> {
 async fn demo_prov_vpc_alloc_ip(wfctx: WfContext) -> WfFuncResult<String> {
     eprintln!("allocate IP");
     let ip = String::from("10.120.121.122");
-    let instance_id = wfctx.lookup::<u64>("instance_id")?;
+    let instance_id = wfctx.lookup::<u64>("instance_id");
     assert_eq!(instance_id, 1211);
     Ok(ip)
 }
@@ -106,7 +106,7 @@ async fn demo_prov_server_reserve(
     wfctx: WfContext,
 ) -> WfFuncResult<ServerAllocResult> {
     eprintln!("    reserve server");
-    let server_id = wfctx.lookup::<u64>("server_id")?;
+    let server_id = wfctx.lookup::<u64>("server_id");
     assert_eq!(server_id, 1212);
     Ok(ServerAllocResult { server_id })
 }
@@ -114,40 +114,40 @@ async fn demo_prov_server_reserve(
 async fn demo_prov_volume_create(wfctx: WfContext) -> WfFuncResult<u64> {
     eprintln!("create volume");
     let volume_id = 1213u64;
-    assert_eq!(wfctx.lookup::<u64>("instance_id")?, 1211);
+    assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
     Ok(volume_id)
 }
 async fn demo_prov_instance_configure(wfctx: WfContext) -> WfFuncResult<()> {
     eprintln!("configure instance");
-    assert_eq!(wfctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(wfctx.lookup::<u64>("server_id")?, 1212);
-    assert_eq!(wfctx.lookup::<u64>("volume_id")?, 1213);
+    assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
+    assert_eq!(wfctx.lookup::<u64>("server_id"), 1212);
+    assert_eq!(wfctx.lookup::<u64>("volume_id"), 1213);
     Ok(())
 }
 async fn demo_prov_volume_attach(wfctx: WfContext) -> WfFuncResult<()> {
     eprintln!("attach volume");
-    assert_eq!(wfctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(wfctx.lookup::<u64>("server_id")?, 1212);
-    assert_eq!(wfctx.lookup::<u64>("volume_id")?, 1213);
+    assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
+    assert_eq!(wfctx.lookup::<u64>("server_id"), 1212);
+    assert_eq!(wfctx.lookup::<u64>("volume_id"), 1213);
     Ok(())
 }
 async fn demo_prov_instance_boot(wfctx: WfContext) -> WfFuncResult<()> {
     eprintln!("boot instance");
-    assert_eq!(wfctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(wfctx.lookup::<u64>("server_id")?, 1212);
-    assert_eq!(wfctx.lookup::<u64>("volume_id")?, 1213);
+    assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
+    assert_eq!(wfctx.lookup::<u64>("server_id"), 1212);
+    assert_eq!(wfctx.lookup::<u64>("volume_id"), 1213);
     Ok(())
 }
 
 async fn demo_prov_print(wfctx: WfContext) -> WfFuncResult<()> {
     eprintln!("printing final state:");
-    let instance_id = wfctx.lookup::<u64>("instance_id")?;
+    let instance_id = wfctx.lookup::<u64>("instance_id");
     eprintln!("  instance id: {}", instance_id);
-    let ip = wfctx.lookup::<String>("instance_ip")?;
+    let ip = wfctx.lookup::<String>("instance_ip");
     eprintln!("  IP address: {}", ip);
-    let volume_id = wfctx.lookup::<u64>("volume_id")?;
+    let volume_id = wfctx.lookup::<u64>("volume_id");
     eprintln!("  volume id: {}", volume_id);
-    let server_id = wfctx.lookup::<u64>("server_id")?;
+    let server_id = wfctx.lookup::<u64>("server_id");
     eprintln!("  server id: {}", server_id);
     Ok(())
 }
