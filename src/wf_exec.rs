@@ -593,22 +593,9 @@ impl WfExecutor {
         self.make_ancestor_tree(tree, live_state, node, false);
     }
 
-    pub async fn inject_error(&self, node_name: &str) {
-        /* First, find the node with that name. */
-        let mut maybe_node_id: Option<NodeIndex> = None;
-        for (node, name) in &self.workflow.node_names {
-            if name == node_name {
-                maybe_node_id = Some(*node);
-                break;
-            }
-        }
-
-        if let Some(node_id) = maybe_node_id {
-            let mut live_state = self.live_state.lock().await;
-            live_state.injected_errors.insert(node_id);
-        } else {
-            panic!("no such node in workflow: \"{}\"", node_name);
-        }
+    pub async fn inject_error(&self, node_id: NodeIndex) {
+        let mut live_state = self.live_state.lock().await;
+        live_state.injected_errors.insert(node_id);
     }
 
     /**
@@ -644,7 +631,7 @@ impl WfExecutor {
              * consumer has run() it (once).
              */
             let live_state = self.live_state.lock().await;
-            if live_state.exec_state == WfState::Done{
+            if live_state.exec_state == WfState::Done {
                 self.finish_tx.send(()).expect("failed to send finish message");
                 return;
             }

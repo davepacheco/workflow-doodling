@@ -39,7 +39,6 @@ use uuid::Uuid;
 pub use example_provision::make_provision_workflow;
 pub use wf_exec::WfContext;
 pub use wf_exec::WfExecutor;
-pub use wf_log::recover_workflow_log;
 pub use wf_log::WfLog;
 pub use wf_log::WfLogResult;
 
@@ -335,6 +334,22 @@ impl Debug for Workflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let dot = petgraph::dot::Dot::new(&self.graph);
         write!(f, "workflow graph: {:?}", dot)
+    }
+}
+
+impl Workflow {
+    pub fn node_for_name(
+        &self,
+        target_name: &str,
+    ) -> Result<NodeIndex, anyhow::Error> {
+        for (node, name) in &self.node_names {
+            if name == target_name {
+                return Ok(*node);
+            }
+        }
+
+        /* TODO-debug workflows should have names, too */
+        Err(anyhow!("workflow has no node named \"{}\"", target_name))
     }
 }
 

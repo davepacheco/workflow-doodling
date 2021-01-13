@@ -246,22 +246,68 @@ impl WfLog {
         })
     }
 
-    pub fn recover<R: Read>(reader: R) -> Result<WfLog, anyhow::Error> {
-        let s: WfLogSerialized = serde_json::from_reader(reader)
+    // TODO-blocking
+    // TODO-design There's some confusion about the recovery process in general
+    // and the "creator" field.  The recorded log has a creator, and each entry
+    // has a creator.  The executor also has a creator, and the WfLog has a
+    // creator.  These can nearly all be different, but the executor and WfLog
+    // creator should match.  Part of the problem here is that the WfLog only
+    // has one "creator", but we really want it to have two: the one in the
+    // recorded log, and the one that's used for new entries.
+    pub fn load<R: Read>(
+        creator: &str,
+        reader: R,
+    ) -> Result<WfLog, anyhow::Error> {
+        let mut s: WfLogSerialized = serde_json::from_reader(reader)
             .with_context(|| "deserializing workflow log")?;
-        let mut wflog = WfLog::new(&s.creator, s.workflow_id);
-        for e in &s.events {
-            if e.workflow_id != s.workflow_id {
+        let mut wflog = WfLog::new(&creator, s.workflow_id);
+        for e in &s.events {}
+
+        /*
+         * Sort the events by the event type.  This ensures that if there's at
+         * least one valid sequence of events, then we'll replay the events in a
+         * valid sequence.  Thus, if we fail to replay below, then the log is
+         * corrupted somehow.  (Remember, the wall timestamp is never used for
+         * correctness.) For debugging purposes, this is a little disappointing:
+         * most likely, the events are already in a valid order that reflects
+         * when they actually happened.  However, there's nothing to guarantee
+         * that unless we make it so, and our simple approach for doing so here
+         * destroys the sequential order.  This should only really matter for a
+         * person looking at the sequence of entries (as they appear in memory)
+         * for debugging.
+         */
+        s.events.sort_by_key(|f| match f.event_type {
+            /*
+             * TODO-cleanup Is there a better way to do this?  We want to sort
+             * by the event type, where event types are compared by the order
+             * they're defined in WfEventType.  We could almost use derived
+             * PartialOrd and PartialEq implementations for WfEventType, except
+             * that one variant has a payload that does _not_ necessarily
+             * implement PartialEq or PartialOrd.  It seems like that means we
+             * have to implement this by hand.
+             */
+            WfNodeEventType::Started => 1,
+            WfNodeEventType::Succeeded(_) => 2,
+            WfNodeEventType::Failed => 3,
+            WfNodeEventType::UndoStarted => 4,
+            WfNodeEventType::UndoFinished => 5,
+        });
+
+        /*
+         * Replay the events for this workflow.
+         */
+        for event in s.events {
+            if event.workflow_id != wflog.workflow_id {
                 return Err(anyhow!(
                     "found an event in the log for a \
                     different workflow ({}) than the log's header ({})",
-                    e.workflow_id,
-                    s.workflow_id
+                    event.workflow_id,
+                    wflog.workflow_id
                 ));
             }
-        }
 
-        recover_workflow_log(&mut wflog, s.events)?;
+            wflog.record(event).with_context(|| "recovering workflow log")?;
+        }
         Ok(wflog)
     }
 }
@@ -293,70 +339,6 @@ impl fmt::Debug for WfLog {
 
         Ok(())
     }
-}
-
-/**
- * Reconstruct a workflow's persistent log state
- *
- * # Panics
- *
- * If `wflog` has already recorded any events or if any of the provided
- * workflow events do not belong to the same workflow named in `wflog`.
- * XXX make this non-public
- */
-pub fn recover_workflow_log(
-    wflog: &mut WfLog,
-    mut events: Vec<WfNodeEvent>,
-) -> Result<(), WfError> {
-    /*
-     * This is our runtime way of ensuring you don't go from write-mode to
-     * recovery mode.  See the TODO on WfLog above -- we could enforce this at
-     * compile time instead.
-     */
-    assert!(wflog.events.is_empty());
-
-    /*
-     * Sort the events by the event type.  This ensures that if there's at least
-     * one valid sequence of events, then we'll replay the events in a valid
-     * sequence.  Thus, if we fail to replay below, then the log is corrupted
-     * somehow.  (Remember, the wall timestamp is never used for correctness.)
-     * For debugging purposes, this is a little disappointing: most likely, the
-     * events are already in a valid order that reflects when they actually
-     * happened.  However, there's nothing to guarantee that unless we make it
-     * so, and our simple approach for doing so here destroys the sequential
-     * order.  This should only really matter for a person looking at the
-     * sequence of entries (as they appear in memory) for debugging.
-     */
-    events.sort_by_key(|f| match f.event_type {
-        /*
-         * TODO-cleanup Is there a better way to do this?  We want to sort by
-         * the event type, where event types are compared by the order they're
-         * defined in WfEventType.  We could almost use derived PartialOrd and
-         * PartialEq implementations for WfEventType, except that one variant
-         * has a payload that does _not_ necessarily implement PartialEq or
-         * PartialOrd.  It seems like that means we have to implement this by
-         * hand.
-         */
-        WfNodeEventType::Started => 1,
-        WfNodeEventType::Succeeded(_) => 2,
-        WfNodeEventType::Failed => 3,
-        WfNodeEventType::UndoStarted => 4,
-        WfNodeEventType::UndoFinished => 5,
-    });
-
-    /*
-     * Replay the events for this workflow.
-     */
-    for event in events {
-        /*
-         * The caller is responsible for ensuring that all of our events are for
-         * the correct workflow.
-         */
-        assert_eq!(wflog.workflow_id, event.workflow_id);
-        wflog.record(event).with_context(|| "recovering workflow log")?;
-    }
-
-    Ok(())
 }
 
 //
