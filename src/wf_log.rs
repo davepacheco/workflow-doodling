@@ -2,12 +2,12 @@
 
 use crate::WfError;
 use crate::WfId;
-use crate::WfOutput;
 use anyhow::anyhow;
 use anyhow::Context;
 use chrono::DateTime;
 use chrono::SecondsFormat;
 use chrono::Utc;
+use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -28,7 +28,7 @@ pub enum WfNodeEventType {
     /** The action has started running */
     Started,
     /** The action completed successfully (with output data) */
-    Succeeded(WfOutput),
+    Succeeded(Arc<JsonValue>),
     /** The action failed */
     Failed,
     /** The undo action has started running */
@@ -68,7 +68,7 @@ pub enum WfNodeLoadStatus {
     /** The action has started running */
     Started,
     /** The action completed successfully (with output data) */
-    Succeeded(WfOutput),
+    Succeeded(Arc<JsonValue>),
     /** The action failed */
     Failed,
     /** The undo action has started running */
@@ -88,7 +88,7 @@ impl WfNodeLoadStatus {
                 Ok(WfNodeLoadStatus::Started)
             }
             (WfNodeLoadStatus::Started, WfNodeEventType::Succeeded(out)) => {
-                Ok(WfNodeLoadStatus::Succeeded(Arc::clone(&out)))
+                Ok(WfNodeLoadStatus::Succeeded(Arc::clone(out)))
             }
             (WfNodeLoadStatus::Started, WfNodeEventType::Failed) => {
                 Ok(WfNodeLoadStatus::Failed)

@@ -4,11 +4,11 @@ use crate::wf_log::WfNodeEventType;
 use crate::wf_log::WfNodeLoadStatus;
 use crate::WfAction;
 use crate::WfActionInjectError;
+use crate::WfActionResult;
 use crate::WfError;
+use crate::WfActionOutput;
 use crate::WfId;
 use crate::WfLog;
-use crate::WfOutput;
-use crate::WfResult;
 use crate::Workflow;
 use anyhow::anyhow;
 use core::future::Future;
@@ -25,6 +25,7 @@ use petgraph::Direction;
 use petgraph::Graph;
 use petgraph::Incoming;
 use petgraph::Outgoing;
+use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -40,7 +41,7 @@ use uuid::Uuid;
  * children (to notify when undone), and to each direction as well?  Then the
  * whole thing is a message passing exercise?
  */
-struct WfnsDone(WfOutput);
+struct WfnsDone(Arc<JsonValue>);
 struct WfnsFailed(WfError);
 struct WfnsUndone;
 
@@ -276,7 +277,7 @@ struct TaskParams {
     done_tx: mpsc::Sender<TaskCompletion>,
     /** Ancestor tree for this node.  See [`WfContext`]. */
     // TODO-cleanup there's no reason this should be an Arc.
-    ancestor_tree: Arc<BTreeMap<String, WfOutput>>,
+    ancestor_tree: Arc<BTreeMap<String, Arc<JsonValue>>>,
     /** The action itself that we're executing. */
     action: Arc<dyn WfAction>,
 }
@@ -543,7 +544,7 @@ impl WfExecutor {
      */
     fn make_ancestor_tree(
         &self,
-        tree: &mut BTreeMap<String, WfOutput>,
+        tree: &mut BTreeMap<String, Arc<JsonValue>>,
         live_state: &WfExecLiveState,
         node: NodeIndex,
         include_self: bool,
@@ -561,7 +562,7 @@ impl WfExecutor {
 
     fn make_ancestor_tree_node(
         &self,
-        tree: &mut BTreeMap<String, WfOutput>,
+        tree: &mut BTreeMap<String, Arc<JsonValue>>,
         live_state: &WfExecLiveState,
         node: NodeIndex,
     ) {
@@ -1092,7 +1093,7 @@ struct WfExecLiveState {
 
     /** Outputs saved by completed actions. */
     // TODO may as well store errors too
-    node_outputs: BTreeMap<NodeIndex, WfOutput>,
+    node_outputs: BTreeMap<NodeIndex, Arc<JsonValue>>,
     /** Set of undone nodes. */
     nodes_undone: BTreeSet<NodeIndex>,
 
@@ -1197,10 +1198,10 @@ impl WfExecLiveState {
             .expect("processing task completion with no task present")
     }
 
-    fn node_output(&self, node_id: NodeIndex) -> WfOutput {
+    fn node_output(&self, node_id: NodeIndex) -> Arc<JsonValue> {
         let output =
             self.node_outputs.get(&node_id).expect("node has no output");
-        Arc::clone(&output)
+        Arc::clone(output)
     }
 }
 
@@ -1210,15 +1211,15 @@ impl WfExecLiveState {
 pub struct WfExecResult {
     pub workflow_id: WfId,
     pub wflog: WfLog,
-    pub node_results: BTreeMap<String, WfResult>,
+    pub node_results: BTreeMap<String, WfActionResult>,
     succeeded: bool,
 }
 
 impl WfExecResult {
-    pub fn lookup_output<T: Send + Sync + 'static>(
+    pub fn lookup_output<T: WfActionOutput + 'static>(
         &self,
         name: &str,
-    ) -> Result<Arc<T>, WfError> {
+    ) -> Result<T, WfError> {
         if !self.succeeded {
             return Err(anyhow!(
                 "fetch output \"{}\" from workflow execution \
@@ -1236,10 +1237,12 @@ impl WfExecResult {
             "node with name \"{}\" failed and did not produce an output",
             name
         ));
-        Ok(Arc::clone(&item).downcast::<T>().expect(&format!(
+        // TODO-cleanup double-asterisk seems ridiculous
+        let parsed: T = serde_json::from_value((**item).clone()).expect(&format!(
             "requested wrong type for output of node with name \"{}\"",
             name
-        )))
+        ));
+        Ok(parsed)
     }
 }
 
@@ -1325,7 +1328,7 @@ fn recovery_validate_parent(
  * have enough state to know which node is invoking the API.
  */
 pub struct WfContext {
-    ancestor_tree: Arc<BTreeMap<String, WfOutput>>,
+    ancestor_tree: Arc<BTreeMap<String, Arc<JsonValue>>>,
     node_id: NodeIndex,
     workflow: Arc<Workflow>,
     live_state: Arc<Mutex<WfExecLiveState>>,
@@ -1338,10 +1341,6 @@ impl WfContext {
      * Retrieves a piece of data stored by a previous (ancestor) node in the
      * current workflow.  The data is identified by `name`.
      *
-     * Data is returned as `Arc<T>` (as opposed to `T`) because all descendant
-     * nodes have access to the data stored by a node (so there may be many
-     * references).  Once stored, a given piece of data is immutable.
-     *
      *
      * # Panics
      *
@@ -1352,16 +1351,17 @@ impl WfContext {
      * the previous action stored.  We would enforce this at compile time if we
      * could.
      */
-    pub fn lookup<T: Send + Sync + 'static>(
+    // XXX why is this a Result?
+    pub fn lookup<T: WfActionOutput + 'static>(
         &self,
         name: &str,
-    ) -> Result<Arc<T>, WfError> {
+    ) -> Result<T, WfError> {
         let item = self
             .ancestor_tree
             .get(name)
             .expect(&format!("no ancestor called \"{}\"", name));
-        let specific_item = Arc::clone(item)
-            .downcast::<T>()
+        // TODO-cleanup double-asterisk seems ridiculous
+        let specific_item = serde_json::from_value((**item).clone())
             .expect(&format!("ancestor \"{}\" produced unexpected type", name));
         Ok(specific_item)
     }

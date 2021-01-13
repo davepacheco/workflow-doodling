@@ -17,6 +17,24 @@ Major areas to derisk
 TODO
 ----------------------------------------
 
+- Currently: working on serialize/deserialize for workflow outputs.  Suggestion:
+  - idea 1: use erased_serde and define new trait WfOutput: Serialize +
+    DeserializeOwned.  Actions return `Box<dyn WfOutput>`.  Internally, the
+    framework serializes it (e.g., to JSON) and stores _that_ to the log and to
+    the internal state.  At lookup-time, we attempt to deserialize that.  Later,
+    maybe we add a cache that stores the object as Arc<dyn Any>.
+  - idea 2: same, but actions directly return strings.  This sucks because we
+    don't even know it's valid JSON.
+  - idea 3: each WfAction is parametrized by the return type, which must impl
+    Serialize + DeserializeOwned + etc.  Maybe we even wrap these up in such a
+    way that they're callable uniformly by WfExec, similar to the way we do this
+    for route handlers in Dropshot.  In this case, there'd be a WfActionWrap
+    struct that Workflow would cons up for each WfAction.  The constructor would
+    be generic over the returned type, but the resulting _type_ would not be.
+    This seems possible, but gets to be a mess quickly: in the dropshot case,
+    the return value from the thing that we're abstracting over winds up being
+    uniform (and so pretty generic).  The analog here would wind up being the
+    String representation.
 - Get to something demo-able:
   - add a way to write the log to a file and read it back.  That will help
     experiment more.
