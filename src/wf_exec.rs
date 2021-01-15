@@ -43,7 +43,7 @@ use uuid::Uuid;
  */
 struct WfnsDone(Arc<JsonValue>);
 struct WfnsFailed(WfError);
-struct WfnsUndone;
+struct WfnsUndone(WfUndoMode);
 
 struct WfNode<S: WfNodeStateType> {
     node_id: NodeIndex,
@@ -91,7 +91,7 @@ impl WfNodeRest for WfNode<WfnsDone> {
              * nodes are "undone" already.
              */
             if neighbors_all(graph, &self.node_id, Outgoing, |child| {
-                live_state.nodes_undone.contains(child)
+                live_state.nodes_undone.contains_key(child)
             }) {
                 live_state.queue_undo.push(self.node_id);
             }
@@ -132,10 +132,12 @@ impl WfNodeRest for WfNode<WfnsFailed> {
              * that.
              */
             if neighbors_all(graph, &self.node_id, Outgoing, |child| {
-                live_state.nodes_undone.contains(child)
+                live_state.nodes_undone.contains_key(child)
             }) {
-                let new_node =
-                    WfNode { node_id: self.node_id, state: WfnsUndone };
+                let new_node = WfNode {
+                    node_id: self.node_id,
+                    state: WfnsUndone(WfUndoMode::ActionFailed),
+                };
                 new_node.propagate(exec, live_state);
             }
         } else {
@@ -145,8 +147,10 @@ impl WfNodeRest for WfNode<WfnsFailed> {
              */
             live_state.exec_state = WfState::Unwinding;
             assert_ne!(self.node_id, exec.workflow.end_node);
-            let new_node =
-                WfNode { node_id: exec.workflow.end_node, state: WfnsUndone };
+            let new_node = WfNode {
+                node_id: exec.workflow.end_node,
+                state: WfnsUndone(WfUndoMode::ActionNeverRan),
+            };
             new_node.propagate(exec, live_state);
         }
     }
@@ -160,8 +164,10 @@ impl WfNodeRest for WfNode<WfnsUndone> {
     fn propagate(&self, exec: &WfExecutor, live_state: &mut WfExecLiveState) {
         let graph = &exec.workflow.graph;
         assert_eq!(live_state.exec_state, WfState::Unwinding);
-        /* TODO side effect in assertion? */
-        assert!(live_state.nodes_undone.insert(self.node_id));
+        live_state
+            .nodes_undone
+            .insert(self.node_id, self.state.0)
+            .expect_none("node already undone");
 
         if self.node_id == exec.workflow.start_node {
             /*
@@ -177,7 +183,7 @@ impl WfNodeRest for WfNode<WfnsUndone> {
          */
         for parent in graph.neighbors_directed(self.node_id, Incoming) {
             if neighbors_all(graph, &parent, Outgoing, |child| {
-                live_state.nodes_undone.contains(child)
+                live_state.nodes_undone.contains_key(child)
             }) {
                 /*
                  * We're ready to undo "parent".  We don't know whether it's
@@ -188,13 +194,24 @@ impl WfNodeRest for WfNode<WfnsUndone> {
                  * to manage state.
                  */
                 match live_state.node_exec_state(&parent) {
-                    WfNodeExecState::Blocked | WfNodeExecState::Failed => {
-                        /*
-                         * If the node never started or if it failed, we can
-                         * just mark it undone without doing anything else.
-                         */
-                        let new_node =
-                            WfNode { node_id: parent, state: WfnsUndone };
+                    /*
+                     * If the node never started or if it failed, we can
+                     * just mark it undone without doing anything else.
+                     */
+                    WfNodeExecState::Blocked => {
+                        let new_node = WfNode {
+                            node_id: parent,
+                            state: WfnsUndone(WfUndoMode::ActionNeverRan),
+                        };
+                        new_node.propagate(exec, live_state);
+                        continue;
+                    }
+
+                    WfNodeExecState::Failed => {
+                        let new_node = WfNode {
+                            node_id: parent,
+                            state: WfnsUndone(WfUndoMode::ActionFailed),
+                        };
                         new_node.propagate(exec, live_state);
                         continue;
                     }
@@ -218,7 +235,8 @@ impl WfNodeRest for WfNode<WfnsUndone> {
                         live_state.queue_undo.push(parent);
                     }
 
-                    WfNodeExecState::QueuedToUndo | WfNodeExecState::Undone => {
+                    WfNodeExecState::QueuedToUndo
+                    | WfNodeExecState::Undone(_) => {
                         panic!(
                             "already undoing or undone node \
                             whose child was just now undone"
@@ -356,7 +374,7 @@ impl WfExecutor {
             queue_undo: Vec::new(),
             node_tasks: BTreeMap::new(),
             node_outputs: BTreeMap::new(),
-            nodes_undone: BTreeSet::new(),
+            nodes_undone: BTreeMap::new(),
             child_workflows: BTreeMap::new(),
             wflog: wflog,
             injected_errors: BTreeSet::new(),
@@ -421,7 +439,7 @@ impl WfExecutor {
                     Outgoing,
                     |c| {
                         assert!(loaded.contains(c));
-                        live_state.nodes_undone.contains(c)
+                        live_state.nodes_undone.contains_key(c)
                     },
                 ))
             };
@@ -459,7 +477,9 @@ impl WfExecutor {
                              * still bifurcated from the case where we didn't
                              * recover the workflow.
                              */
-                            live_state.nodes_undone.insert(node_id);
+                            live_state
+                                .nodes_undone
+                                .insert(node_id, WfUndoMode::ActionNeverRan);
                         }
                         _ => (),
                     }
@@ -494,7 +514,9 @@ impl WfExecutor {
                      * undo action.
                      */
                     if let RecoveryDirection::Unwind(true) = direction {
-                        live_state.nodes_undone.insert(node_id);
+                        live_state
+                            .nodes_undone
+                            .insert(node_id, WfUndoMode::ActionFailed);
                     }
                 }
                 WfNodeLoadStatus::UndoStarted => {
@@ -511,7 +533,9 @@ impl WfExecutor {
                      * undoing this node.
                      */
                     assert!(!forward);
-                    live_state.nodes_undone.insert(node_id);
+                    live_state
+                        .nodes_undone
+                        .insert(node_id, WfUndoMode::ActionUndone);
                 }
             }
 
@@ -526,7 +550,7 @@ impl WfExecutor {
          * Check our done conditions.
          */
         if live_state.node_outputs.contains_key(&workflow.end_node)
-            || live_state.nodes_undone.contains(&workflow.start_node)
+            || live_state.nodes_undone.contains_key(&workflow.start_node)
         {
             live_state.mark_workflow_done();
         }
@@ -893,7 +917,10 @@ impl WfExecutor {
          * what we want to do about it.
          */
         exec_future.await.unwrap();
-        let node = Box::new(WfNode { node_id, state: WfnsUndone });
+        let node = Box::new(WfNode {
+            node_id,
+            state: WfnsUndone(WfUndoMode::ActionUndone),
+        });
         WfExecutor::finish_task(task_params, node).await;
     }
 
@@ -1102,7 +1129,7 @@ struct WfExecLiveState {
     // TODO may as well store errors too
     node_outputs: BTreeMap<NodeIndex, Arc<JsonValue>>,
     /** Set of undone nodes. */
-    nodes_undone: BTreeSet<NodeIndex>,
+    nodes_undone: BTreeMap<NodeIndex, WfUndoMode>,
 
     /** Child workflows created by a node (for status and control) */
     child_workflows: BTreeMap<NodeIndex, Vec<Arc<WfExecutor>>>,
@@ -1122,7 +1149,14 @@ enum WfNodeExecState {
     Done,
     Failed,
     QueuedToUndo,
-    Undone,
+    Undone(WfUndoMode),
+}
+
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum WfUndoMode {
+    ActionNeverRan,
+    ActionUndone,
+    ActionFailed,
 }
 
 impl fmt::Display for WfNodeExecState {
@@ -1134,7 +1168,9 @@ impl fmt::Display for WfNodeExecState {
             WfNodeExecState::Done => "done",
             WfNodeExecState::Failed => "failed",
             WfNodeExecState::QueuedToUndo => "queued-undo",
-            WfNodeExecState::Undone => "undone",
+            WfNodeExecState::Undone(WfUndoMode::ActionNeverRan) => "abandoned",
+            WfNodeExecState::Undone(WfUndoMode::ActionUndone) => "undone",
+            WfNodeExecState::Undone(WfUndoMode::ActionFailed) => "failed",
         })
     }
 }
@@ -1157,8 +1193,8 @@ impl WfExecLiveState {
         let mut set: BTreeSet<WfNodeExecState> = BTreeSet::new();
         let load_status =
             self.wflog.load_status_for_node(node_id.index() as u64);
-        if self.nodes_undone.contains(node_id) {
-            set.insert(WfNodeExecState::Undone);
+        if let Some(undo_mode) = self.nodes_undone.get(node_id) {
+            set.insert(WfNodeExecState::Undone(*undo_mode));
         } else if self.node_outputs.contains_key(node_id) {
             set.insert(WfNodeExecState::Done);
         } else if let WfNodeLoadStatus::Failed = load_status {
