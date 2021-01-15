@@ -85,15 +85,18 @@ pub fn make_provision_workflow() -> Arc<Workflow> {
 
 async fn demo_prov_instance_create(wfctx: WfContext) -> WfFuncResult<u64> {
     eprintln!("running action: {}", wfctx.node_label());
+    /* make up an instance ID */
     let instance_id = 1211u64;
     Ok(instance_id)
 }
 
 async fn demo_prov_vpc_alloc_ip(wfctx: WfContext) -> WfFuncResult<String> {
     eprintln!("running action: {}", wfctx.node_label());
-    let ip = String::from("10.120.121.122");
+    /* exercise using some data from a previous node */
     let instance_id = wfctx.lookup::<u64>("instance_id");
     assert_eq!(instance_id, 1211);
+    /* make up an IP (simulate allocation) */
+    let ip = String::from("10.120.121.122");
     Ok(ip)
 }
 
@@ -131,6 +134,7 @@ struct ServerAllocResult {
 
 async fn demo_prov_server_pick(wfctx: WfContext) -> WfFuncResult<u64> {
     eprintln!("running action: {}", wfctx.node_label());
+    /* make up ("allocate") a new server id */
     let server_id = 1212u64;
     Ok(server_id)
 }
@@ -139,19 +143,24 @@ async fn demo_prov_server_reserve(
     wfctx: WfContext,
 ) -> WfFuncResult<ServerAllocResult> {
     eprintln!("running action: {}", wfctx.node_label());
+    /* exercise using data from previous nodes */
     let server_id = wfctx.lookup::<u64>("server_id");
     assert_eq!(server_id, 1212);
+    /* package this up for downstream consumers */
     Ok(ServerAllocResult { server_id })
 }
 
 async fn demo_prov_volume_create(wfctx: WfContext) -> WfFuncResult<u64> {
     eprintln!("running action: {}", wfctx.node_label());
-    let volume_id = 1213u64;
+    /* exercise using data from previous nodes */
     assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
+    /* make up ("allocate") a volume id */
+    let volume_id = 1213u64;
     Ok(volume_id)
 }
 async fn demo_prov_instance_configure(wfctx: WfContext) -> WfFuncResult<()> {
     eprintln!("running action: {}", wfctx.node_label());
+    /* exercise using data from previous nodes */
     assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
     assert_eq!(wfctx.lookup::<u64>("server_id"), 1212);
     assert_eq!(wfctx.lookup::<u64>("volume_id"), 1213);
@@ -159,6 +168,7 @@ async fn demo_prov_instance_configure(wfctx: WfContext) -> WfFuncResult<()> {
 }
 async fn demo_prov_volume_attach(wfctx: WfContext) -> WfFuncResult<()> {
     eprintln!("running action: {}", wfctx.node_label());
+    /* exercise using data from previous nodes */
     assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
     assert_eq!(wfctx.lookup::<u64>("server_id"), 1212);
     assert_eq!(wfctx.lookup::<u64>("volume_id"), 1213);
@@ -166,6 +176,7 @@ async fn demo_prov_volume_attach(wfctx: WfContext) -> WfFuncResult<()> {
 }
 async fn demo_prov_instance_boot(wfctx: WfContext) -> WfFuncResult<()> {
     eprintln!("running action: {}", wfctx.node_label());
+    /* exercise using data from previous nodes */
     assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
     assert_eq!(wfctx.lookup::<u64>("server_id"), 1212);
     assert_eq!(wfctx.lookup::<u64>("volume_id"), 1213);
