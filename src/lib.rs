@@ -42,8 +42,8 @@ pub use wf_exec::WfExecutor;
 pub use wf_log::WfLog;
 
 use wf_action::WfAction;
-use wf_action::WfActionUniversalEnd;
-use wf_action::WfActionUniversalStart;
+use wf_action::WfActionEndNode;
+use wf_action::WfActionStartNode;
 
 /* Widely-used types (within workflows) */
 
@@ -120,8 +120,7 @@ impl WfBuilder {
         let mut graph = Graph::new();
         let mut launchers = BTreeMap::new();
         let node_names = BTreeMap::new();
-        let first: Arc<dyn WfAction + 'static> =
-            Arc::new(WfActionUniversalStart {});
+        let first: Arc<dyn WfAction + 'static> = Arc::new(WfActionStartNode {});
         let label = format!("{:?}", first);
         let root = graph.add_node(label);
         launchers.insert(root, first).expect_none("empty map had an element");
@@ -211,8 +210,7 @@ impl WfBuilder {
          * Append an "end" node so that we can easily tell when the workflow has
          * completed.
          */
-        let last: Arc<dyn WfAction + 'static> =
-            Arc::new(WfActionUniversalEnd {});
+        let last: Arc<dyn WfAction + 'static> = Arc::new(WfActionEndNode {});
         let label = format!("{:?}", last);
         let newnode = self.graph.add_node(label);
         self.launchers.insert(newnode, last).unwrap_none();

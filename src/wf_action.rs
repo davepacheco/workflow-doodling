@@ -107,10 +107,10 @@ pub trait WfAction: Debug + Send + Sync {
 
 /** Represents the start node in a graph */
 #[derive(Debug)]
-pub struct WfActionUniversalStart {}
+pub struct WfActionStartNode {}
 
 #[async_trait]
-impl WfAction for WfActionUniversalStart {
+impl WfAction for WfActionStartNode {
     async fn do_it(&self, _: WfContext) -> WfActionResult {
         eprintln!("<action for \"start\" node>");
         Ok(Arc::new(JsonValue::Null))
@@ -126,10 +126,10 @@ impl WfAction for WfActionUniversalStart {
 
 /** Represents the end node in a graph */
 #[derive(Debug)]
-pub struct WfActionUniversalEnd {}
+pub struct WfActionEndNode {}
 
 #[async_trait]
-impl WfAction for WfActionUniversalEnd {
+impl WfAction for WfActionEndNode {
     async fn do_it(&self, _: WfContext) -> WfActionResult {
         eprintln!("<action for \"end\" node: workflow is nearly done>");
         Ok(Arc::new(JsonValue::Null))
