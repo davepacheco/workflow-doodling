@@ -16,6 +16,7 @@ use workflow_doodling::WfLog;
 async fn main() -> Result<(), anyhow::Error> {
     let subcmd = Demo::from_args();
     match subcmd {
+        Demo::Dot => cmd_dot().await,
         Demo::Info => cmd_info().await,
         Demo::PrintLog { ref print_log_args } => {
             cmd_print_log(print_log_args).await
@@ -27,6 +28,9 @@ async fn main() -> Result<(), anyhow::Error> {
 /// Demo workflow implementation
 #[derive(Debug, StructOpt)]
 enum Demo {
+    /// Dump a dot (graphviz) representation of the workflow graph
+    Dot,
+
     /// Dump information about the workflow graph (not an execution)
     Info,
 
@@ -44,6 +48,17 @@ enum Demo {
 }
 
 /*
+ * "dot" subcommand
+ */
+
+async fn cmd_dot() -> Result<(), anyhow::Error> {
+    let mut stdout = io::stdout();
+    let workflow = make_provision_workflow();
+    workflow.print_dot(&mut stdout).unwrap();
+    Ok(())
+}
+
+/*
  * "info" subcommand
  */
 
@@ -51,7 +66,8 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     let mut stderr = io::stderr();
     let workflow = make_provision_workflow();
     eprintln!("*** workflow definition ***");
-    eprintln!("{:?}", workflow);
+    eprintln!("workflow graph: ");
+    workflow.print_dot(&mut stderr).unwrap();
 
     eprintln!("*** initial state ***");
     let exec = WfExecutor::new(workflow, "provision-info");

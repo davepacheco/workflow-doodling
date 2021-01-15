@@ -985,6 +985,10 @@ impl WfExecutor {
         }
     }
 
+    /*
+     * TODO-cleanup It would be more idiomatic to return a Dot struct that impls
+     * Display to do this.
+     */
     // TODO-liveness does this writer need to be async?
     pub fn print_status<'a, 'b, 'c>(
         &'a self,

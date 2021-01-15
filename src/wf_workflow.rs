@@ -4,11 +4,11 @@ use crate::wf_action::WfAction;
 use crate::wf_action::WfActionEndNode;
 use crate::wf_action::WfActionStartNode;
 use anyhow::anyhow;
-use core::fmt;
-use core::fmt::Debug;
+use petgraph::dot;
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
 use std::collections::BTreeMap;
+use std::io;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -34,6 +34,7 @@ pub type WfId = Uuid;
  * You define a workflow using [`WfBuilder`].  You can execute a workflow as
  * many times as you want using [`WfExecutor`].
  */
+#[derive(Debug)]
 pub struct Workflow {
     /** describes the nodes in the graph and their dependencies */
     pub(crate) graph: Graph<String, ()>,
@@ -45,13 +46,6 @@ pub struct Workflow {
     pub(crate) start_node: NodeIndex,
     /** end node */
     pub(crate) end_node: NodeIndex,
-}
-
-impl Debug for Workflow {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let dot = petgraph::dot::Dot::new(&self.graph);
-        write!(f, "workflow graph: {:?}", dot)
-    }
 }
 
 impl Workflow {
@@ -67,6 +61,16 @@ impl Workflow {
 
         /* TODO-debug workflows should have names, too */
         Err(anyhow!("workflow has no node named \"{}\"", target_name))
+    }
+
+    /*
+     * TODO-cleanup It would be more idiomatic to return a Dot struct that impls
+     * Display to do this.
+     */
+    pub fn print_dot(&self, out: &mut dyn io::Write) -> io::Result<()> {
+        let dot =
+            dot::Dot::with_config(&self.graph, &[dot::Config::EdgeNoLabel]);
+        write!(out, "{:?}", dot)
     }
 }
 
