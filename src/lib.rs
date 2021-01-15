@@ -17,30 +17,33 @@
 #![feature(type_name_of_val)]
 
 mod example_provision;
+mod wf_action;
 mod wf_exec;
 mod wf_log;
 
 use anyhow::anyhow;
-use anyhow::Context;
-use async_trait::async_trait;
 use core::fmt;
 use core::fmt::Debug;
-use core::future::Future;
-use core::marker::PhantomData;
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
 pub use example_provision::make_provision_workflow;
+pub use wf_action::new_action_noop_undo;
+pub use wf_action::WfActionFunc;
+pub use wf_action::WfActionResult;
+pub use wf_action::WfError;
+pub use wf_action::WfFuncResult;
+pub use wf_action::WfUndoResult;
 pub use wf_exec::WfContext;
 pub use wf_exec::WfExecutor;
 pub use wf_log::WfLog;
-pub use wf_log::WfLogResult;
+
+use wf_action::WfAction;
+use wf_action::WfActionUniversalEnd;
+use wf_action::WfActionUniversalStart;
 
 /* Widely-used types (within workflows) */
 
@@ -51,270 +54,6 @@ pub use wf_log::WfLogResult;
  * caller-provided?)
  */
 pub type WfId = Uuid;
-/** Error produced by a workflow action or a workflow itself */
-pub type WfError = anyhow::Error;
-/** Result of a function implementing a workflow action */
-pub type WfFuncResult<T> = Result<T, WfError>;
-/** Result of a function implementing a workflow action */
-// TODO-cleanup can we drop this Arc?
-pub type WfActionResult = Result<Arc<JsonValue>, WfError>;
-/** Result of a workflow undo action. */
-pub type WfUndoResult = Result<(), WfError>;
-
-pub trait WfActionOutput:
-    Debug + DeserializeOwned + Serialize + Send + Sync
-{
-}
-impl<T: Debug + DeserializeOwned + Serialize + Send + Sync> WfActionOutput
-    for T
-{
-}
-
-/**
- * Building blocks of workflows
- *
- * Each action consumes a [`WfContext`] and asynchronously produces a
- * [`WfActionResult`].  A workflow is essentially a directed acyclic graph of
- * actions with dependencies between them.
- */
-#[async_trait]
-pub trait WfAction: Debug + Send + Sync {
-    /**
-     * Executes the action for this workflow node, whatever that is.  Actions
-     * function like requests in distributed sagas: critically, they must be
-     * idempotent.  They should be very careful in using interfaces outside of
-     * [`WfContext`] -- we want them to be as self-contained as possible to
-     * ensure idempotence and to minimize versioning issues.
-     *
-     * On success, this function produces a `WfActionOutput`.  This output will
-     * be stored persistently, keyed by the _name_ of the current workflow node.
-     * Subsequent stages can access this data with [`WfContext::lookup`].  This
-     * is the _only_ supported means of sharing state across actions within a
-     * workflow.
-     */
-    async fn do_it(&self, wfctx: WfContext) -> WfActionResult;
-
-    /**
-     * Executes the compensation action for this workflow node, whatever that
-     * is.
-     */
-    async fn undo_it(&self, wfctx: WfContext) -> WfUndoResult;
-}
-
-/**
- * [`WfAction`] implementation for functions
- */
-pub struct WfActionFunc<
-    ActionFutType,
-    ActionFuncType,
-    ActionFuncOutput,
-    UndoFutType,
-    UndoFuncType,
-> where
-    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType:
-        Future<Output = WfFuncResult<ActionFuncOutput>> + Send + Sync + 'static,
-    ActionFuncOutput: WfActionOutput + 'static,
-    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
-{
-    action_func: ActionFuncType,
-    undo_func: UndoFuncType,
-    phantom: PhantomData<(ActionFutType, UndoFutType)>,
-}
-
-impl<
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    >
-    WfActionFunc<
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    >
-where
-    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType:
-        Future<Output = WfFuncResult<ActionFuncOutput>> + Send + Sync + 'static,
-    ActionFuncOutput: WfActionOutput + 'static,
-    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
-{
-    /**
-     * Wrap a function in a `WfActionFunc`
-     *
-     * We return the result as a `Arc<dyn WfAction>` so that it can be used
-     * directly where `WfAction`s are expected.  The struct `WfActionFunc` has
-     * no interfaces of its own so there's generally no need to have the
-     * specific type.
-     */
-    pub fn new_action(
-        action_func: ActionFuncType,
-        undo_func: UndoFuncType,
-    ) -> Arc<dyn WfAction> {
-        Arc::new(WfActionFunc { action_func, undo_func, phantom: PhantomData })
-    }
-}
-
-/*
- * TODO-cleanup why can't new_action_noop_undo be in the WfAction namespace?
- */
-
-async fn undo_noop(wfctx: WfContext) -> WfUndoResult {
-    eprintln!("<noop undo for node: \"{}\">", wfctx.node_label());
-    Ok(())
-}
-
-/**
- * Wrap an action function whose "undo" is a noop.
- */
-pub fn new_action_noop_undo<ActionFutType, ActionFuncType, ActionFuncOutput>(
-    f: ActionFuncType,
-) -> Arc<dyn WfAction>
-where
-    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType:
-        Future<Output = WfFuncResult<ActionFuncOutput>> + Send + Sync + 'static,
-    ActionFuncOutput: WfActionOutput + 'static,
-{
-    WfActionFunc::new_action(f, undo_noop)
-}
-
-#[async_trait]
-impl<
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    > WfAction
-    for WfActionFunc<
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    >
-where
-    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType:
-        Future<Output = WfFuncResult<ActionFuncOutput>> + Send + Sync + 'static,
-    ActionFuncOutput: WfActionOutput + 'static,
-    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
-{
-    async fn do_it(&self, wfctx: WfContext) -> WfActionResult {
-        let label = wfctx.node_label().to_owned();
-        let fut = { (self.action_func)(wfctx) };
-        fut.await
-            .with_context(|| format!("executing node \"{}\"", label))
-            .and_then(|func_output| {
-                serde_json::to_value(func_output).with_context(|| {
-                    format!("serializing output from node \"{}\"", label)
-                })
-            })
-            .map(Arc::new)
-    }
-
-    async fn undo_it(&self, wfctx: WfContext) -> WfUndoResult {
-        let fut = { (self.undo_func)(wfctx) };
-        fut.await
-    }
-}
-
-impl<
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    > Debug
-    for WfActionFunc<
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    >
-where
-    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType:
-        Future<Output = WfFuncResult<ActionFuncOutput>> + Send + Sync + 'static,
-    ActionFuncOutput: WfActionOutput + 'static,
-    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&std::any::type_name_of_val(&self.action_func))
-    }
-}
-
-/** Placeholder type for the start node in a graph. */
-#[derive(Debug)]
-struct WfActionUniversalStart {}
-
-#[async_trait]
-impl WfAction for WfActionUniversalStart {
-    async fn do_it(&self, _: WfContext) -> WfActionResult {
-        eprintln!("<action for \"start\" node>");
-        Ok(Arc::new(JsonValue::Null))
-    }
-
-    async fn undo_it(&self, _: WfContext) -> WfUndoResult {
-        eprintln!(
-            "<undo for \"start\" node (workflow is nearly done unwinding)>"
-        );
-        Ok(())
-    }
-}
-
-/** Placeholder type for the end node in a graph. */
-#[derive(Debug)]
-struct WfActionUniversalEnd {}
-
-#[async_trait]
-impl WfAction for WfActionUniversalEnd {
-    async fn do_it(&self, _: WfContext) -> WfActionResult {
-        eprintln!("<action for \"end\" node: workflow is nearly done>");
-        Ok(Arc::new(JsonValue::Null))
-    }
-
-    async fn undo_it(&self, _: WfContext) -> WfUndoResult {
-        /*
-         * We should not run compensation actions for nodes that have not
-         * started.  We should never start this node unless all other actions
-         * have completed.  We should never unwind a workflow unless some action
-         * failed.  Thus, we should never undo the "end" node in a workflow.
-         */
-        panic!("attempted to undo end node in workflow");
-    }
-}
-
-/** Action implementation that simulates an error at a given stage. */
-#[derive(Debug)]
-struct WfActionInjectError {}
-
-#[async_trait]
-impl WfAction for WfActionInjectError {
-    async fn do_it(&self, wfctx: WfContext) -> WfActionResult {
-        let message = format!(
-            "<boom! error injected instead of action for \
-            node \"{}\">",
-            wfctx.node_label()
-        );
-        eprintln!("{}", message);
-        Err(anyhow!("{}", message))
-    }
-
-    async fn undo_it(&self, _: WfContext) -> WfUndoResult {
-        unimplemented!();
-    }
-}
 
 /**
  * Describes a directed acyclic graph of actions
