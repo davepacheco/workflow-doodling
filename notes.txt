@@ -1,98 +1,41 @@
-Summary of major open questions
-----------------------------------------
+Notes for future work
+-----------------------
 
-- Failover!  See notes below.
+Breakpoints, pausing, etc: create a common "wait" function.  Arguments describe
+the event (e.g., starting action for node X).  In pause mode, it checks a
+condition and decides whether to wait.  In "step" mode, it decrements a
+semaphore.  In normal mode, it does nothing.)  Could add CLI tool that runs up
+to a breakpoint and exits (optionally dumps log).  Could then add a "step"
+version.
 
+Subworkflows and recovery: this might "just work" if workflow actions that
+create subworkflows were idempotent.  But I don't think they are today.  Maybe
+if we first-class `WfActionWorkflow`, the framework can ensure that this is done
+idempotently.  Relatedly, if we add policies around whether each node has an
+"undo" action, for this type of node, we might need that policy to differ
+depending on the WfActionWorkflow (and not the Workflow behind it).
 
-Major areas to derisk
-----------------------------------------
+Static typing in the construction and execution of the graph:
 
-- Reversibility: how do we allow consumers to express that some or all of
-  these actions are reversible and then implement that such that if a
-  Workflow step fails in a way that demands reversal of the workflow, then we
-  carry that out?  And how do we determine whether errors within subworkflows
-  demand that the parent workflow also be reversed?
-- Integration into oxide-api-prototype
+- See notes from Cliff below.
+- Probably: this isn't so much input/output for each function, but a set of
+  state depended-on by the function and a set of state produced by the
+  function.  (The difference is that the input of one does not need to
+  match the output of the previous one, like I was previously assuming).
+- starting to see how a macro could allow you to say field X has type Y and
+  insert into the beginning of your function the appropriate calls to
+  lookup(), though that still wouldn't be statically type-checked.
+- Would one piece of this be to use macros on the action functions that
+  also generate input and output types specific to that function?  Would
+  they also need to generate glue code from previous and subsequent nodes?
+- I think we want the Graph data structure to erase the specific
+  input/output types as we do today.  But maybe when it's still in the
+  builder stage, we keep track of these types so that we can fail at
+  compile time when constructing an invalid graph.
 
-TODO
-----------------------------------------
+Even if we skip the static typing: the interface for constructing a workflow
+DAG feels like it needs work.
 
-- Prepare for demo
-  - add human-readable label that's separate from the name
-  - Write README, to include reference to McCaffrey's talk
-- Open questions above
-- Major areas to derisk above
-- There's also a ton of cleanup to do here.
-  - Lots of TODOs
-  - Reconsider:
-    - naming (Workflow vs. WorkflowExecution?  Sagas?).
-    - prefixes (Wf prefix on most things)
-    - what's exported publicly
-    - what code is in what files
-- Subworkflows and recovery: this might "just work" if workflow actions that
-  create subworkflows were idempotent.  But I don't think they are today.
-  Maybe if we first-class `WfActionWorkflow`, the framework can ensure that
-  this is done idempotently.
-- Features:
-  - pausing, "breakpoints", step through, etc. (thought: create a common
-    "wait" function.  Arguments describe the event (e.g., starting action for
-    node X).  In pause mode, it checks a condition and decides whether to
-    wait.  In "step" mode, it decrements a semaphore.  In normal mode, it
-    does nothing.)
-    - could add CLI tool that runs up to a breakpoint and exits (optionally
-      dumps log).  Could then add a "step" version.
-  - concurrency limit
-  - canarying
-  - blast radius?
-  - policy around what to do on failure (stop, rewind)
-  - Allow workflow execution to consume parameters
-  - It could be easier to define functions that _don't_ record any persistent
-    state (to avoid having to assign a name and to avoid the boilerplate of
-    Ok(Arc::new(()))
-- Revisit static typing in the construction and execution of the graph?
-  - See notes from Cliff below.
-  - Probably: this isn't so much input/output for each function, but a set of
-    state depended-on by the function and a set of state produced by the
-    function.  (The difference is that the input of one does not need to
-    match the output of the previous one, like I was previously assuming).
-  - starting to see how a macro could allow you to say field X has type Y and
-    insert into the beginning of your function the appropriate calls to
-    lookup(), though that still wouldn't be statically type-checked.
-  - Would one piece of this be to use macros on the action functions that
-    also generate input and output types specific to that function?  Would
-    they also need to generate glue code from previous and subsequent nodes?
-  - I think we want the Graph data structure to erase the specific
-    input/output types as we do today.  But maybe when it's still in the
-    builder stage, we keep track of these types so that we can fail at
-    compile time when constructing an invalid graph.
-- Even if we skip the static typing: the interface for constructing a workflow
-  DAG feels like it needs work.
-- Review public interface and documentation
-- Revisit serialization of log.  The event_type enum seems odd.
-
-What exists so far
--------------------
-
-The current status is that we have (NOTE: proof-of-concept testing so far,
-nothing close to exhaustive testing):
-
-- basic types: WfError, WfResult
-- WfAction, a trait representing the actions taken for nodes in the graph
-- WfActionFunc, which makes it easy to create WfActions from functions
-- WfBuilder, an interface for constructing a workflow graph pretty much by
-  hand
-- basic execution via WfExecutor: an executor that walks the graph and
-  executes exactly the steps that it's allowed to execute with maximum
-  parallelism
-- shared data between actions
-- composeability: inserting an entire workflow into a workflow node.  A big
-  challenge here is that the state objects will differ.  Callers have to deal
-  with this in the node that's part of the parent graph.  (That's kind of
-  what you want anyway: callers will already be taking parameters out of the
-  parent state and making them part of the child state, most likely.)
-- summary of current state a la Manta resharder
-- basic persistence (in the from of the log)
-- recovery from partial logs
 
 ================================================================
 [2021-01-08] Notes from discussions with Cliff
