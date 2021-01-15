@@ -1057,13 +1057,21 @@ impl WfExecutor {
                 )?;
                 if nodes.len() == 1 {
                     let node = nodes[0];
-                    let node_name = &self.workflow.node_names[&node];
+                    let node_label = format!(
+                        "{} (produces \"{}\")",
+                        self.workflow.node_labels[&node],
+                        &self.workflow.node_names[&node]
+                    );
                     let node_state = live_state.node_exec_state(&node);
-                    write!(out, "{}: {}\n", node_state, node_name)?;
+                    write!(out, "{}: {}\n", node_state, node_label)?;
                 } else {
                     write!(out, "+ (actions in parallel)\n")?;
                     for node in nodes {
-                        let node_name = &self.workflow.node_names[&node];
+                        let node_label = format!(
+                            "{} (produces \"{}\")",
+                            self.workflow.node_labels[&node],
+                            &self.workflow.node_names[&node]
+                        );
                         let node_state = live_state.node_exec_state(&node);
                         let child_workflows =
                             live_state.child_workflows.get(&node);
@@ -1077,7 +1085,7 @@ impl WfExecutor {
                             "",
                             subworkflow_char,
                             node_state,
-                            node_name,
+                            node_label,
                             width = big_indent
                         )?;
 
@@ -1443,6 +1451,6 @@ impl WfContext {
     }
 
     pub fn node_label(&self) -> &str {
-        self.workflow.node_names.get(&self.node_id).unwrap()
+        self.workflow.node_labels.get(&self.node_id).unwrap()
     }
 }

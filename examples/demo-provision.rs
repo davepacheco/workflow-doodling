@@ -124,16 +124,26 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     let mut stderr = io::stderr();
     let workflow = make_provision_workflow();
     let exec = if let Some(input_log_path) = &args.recover_from {
+        eprintln!("recovering from log: {}", input_log_path.display());
+
         let file = fs::File::open(&input_log_path).with_context(|| {
             format!("open recovery log \"{}\"", input_log_path.display())
         })?;
         let wflog = WfLog::load(&args.creator, file).with_context(|| {
             format!("load log \"{}\"", input_log_path.display())
         })?;
-        WfExecutor::new_recover(Arc::clone(&workflow), wflog, &args.creator)
-            .with_context(|| {
-                format!("recover log \"{}\"", input_log_path.display())
-            })?
+        let exec = WfExecutor::new_recover(
+            Arc::clone(&workflow),
+            wflog,
+            &args.creator,
+        )
+        .with_context(|| {
+            format!("recover log \"{}\"", input_log_path.display())
+        })?;
+
+        eprintln!("recovered state:");
+        exec.print_status(&mut stderr, 0).await.unwrap();
+        exec
     } else {
         WfExecutor::new(Arc::clone(&workflow), &args.creator)
     };

@@ -42,6 +42,8 @@ pub struct Workflow {
     pub(crate) launchers: BTreeMap<NodeIndex, Arc<dyn WfAction>>,
     /** name associated with each node in the graph */
     pub(crate) node_names: BTreeMap<NodeIndex, String>,
+    /** human-readable labels associated with each node in the graph */
+    pub(crate) node_labels: BTreeMap<NodeIndex, String>,
     /** start node */
     pub(crate) start_node: NodeIndex,
     /** end node */
@@ -91,6 +93,8 @@ pub struct WfBuilder {
      * that node.
      */
     node_names: BTreeMap<NodeIndex, String>,
+    /** For each node, a human-readable label for the node. */
+    node_labels: BTreeMap<NodeIndex, String>,
     /** Root node of the graph */
     root: NodeIndex,
     /** Last set of nodes added.  This is used when appending to the graph. */
@@ -102,12 +106,20 @@ impl WfBuilder {
         let mut graph = Graph::new();
         let mut launchers = BTreeMap::new();
         let node_names = BTreeMap::new();
+        let node_labels = BTreeMap::new();
         let first: Arc<dyn WfAction + 'static> = Arc::new(WfActionStartNode {});
         let label = format!("{:?}", first);
         let root = graph.add_node(label);
         launchers.insert(root, first).expect_none("empty map had an element");
 
-        WfBuilder { graph, launchers, root, node_names, last_added: vec![root] }
+        WfBuilder {
+            graph,
+            launchers,
+            root,
+            node_names,
+            node_labels,
+            last_added: vec![root],
+        }
     }
 
     /**
@@ -123,15 +135,23 @@ impl WfBuilder {
      * the action so that descendant nodes can access it using
      * [`WfContext::lookup`].
      */
-    pub fn append(&mut self, name: &str, action: Arc<dyn WfAction>) {
-        let label = format!("{:?}", action);
-        let newnode = self.graph.add_node(label);
+    pub fn append(
+        &mut self,
+        name: &str,
+        label: &str,
+        action: Arc<dyn WfAction>,
+    ) {
+        let newnode = self.graph.add_node(label.to_string());
         self.launchers
             .insert(newnode, action)
             .expect_none("action already present for newly created node");
+        /* TODO-correctness this doesn't check name uniqueness! */
         self.node_names
             .insert(newnode, name.to_string())
             .expect_none("name already used in this workflow");
+        self.node_labels
+            .insert(newnode, label.to_string())
+            .expect_none("labels already used in this workflow");
         for node in &self.last_added {
             self.graph.add_edge(*node, newnode, ());
         }
@@ -147,18 +167,24 @@ impl WfBuilder {
      * is a vector of `(name, action)` tuples analogous to the arguments to
      * [`WfBuilder::append`].
      */
-    pub fn append_parallel(&mut self, actions: Vec<(&str, Arc<dyn WfAction>)>) {
+    pub fn append_parallel(
+        &mut self,
+        actions: Vec<(&str, &str, Arc<dyn WfAction>)>,
+    ) {
         let newnodes: Vec<NodeIndex> = actions
             .into_iter()
-            .map(|(n, a)| {
-                let label = format!("{:?}", a);
-                let node = self.graph.add_node(label);
+            .map(|(n, l, a)| {
+                let node = self.graph.add_node(l.to_string());
                 self.launchers.insert(node, a).expect_none(
                     "action already present for newly created node",
                 );
+                /* TODO-correctness does not validate the name! */
                 self.node_names
                     .insert(node, n.to_string())
                     .expect_none("name already used in this workflow");
+                self.node_labels
+                    .insert(node, l.to_string())
+                    .expect_none("node already has a label");
                 node
             })
             .collect();
@@ -206,6 +232,7 @@ impl WfBuilder {
             graph: self.graph,
             launchers: self.launchers,
             node_names: self.node_names,
+            node_labels: self.node_labels,
             start_node: self.root,
             end_node: newnode,
         }
