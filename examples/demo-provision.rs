@@ -141,8 +141,9 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             format!("recover log \"{}\"", input_log_path.display())
         })?;
 
-        eprintln!("recovered state:");
+        eprint!("recovered state\n");
         exec.print_status(&mut stderr, 0).await.unwrap();
+        eprintln!("");
         exec
     } else {
         WfExecutor::new(Arc::clone(&workflow), &args.creator)
@@ -154,10 +155,10 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
                 format!("bad argument for --inject-error: {:?}", node_name)
             })?;
         exec.inject_error(node_id).await;
-        eprintln!("injecting error at node \"{}\"", node_name);
+        eprintln!("will inject error at node \"{}\"", node_name);
     }
 
-    eprintln!("\n*** running workflow ***");
+    eprintln!("*** running workflow ***");
     exec.run().await;
     eprintln!("*** finished workflow ***");
 
