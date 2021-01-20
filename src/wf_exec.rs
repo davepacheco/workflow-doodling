@@ -1,4 +1,4 @@
-//! Manages execution of a workflow
+//! Manages execution of a saga
 
 use crate::wf_action::WfAction;
 use crate::wf_action::WfActionInjectError;
@@ -8,8 +8,8 @@ use crate::wf_action::WfError;
 use crate::wf_log::WfNodeEventType;
 use crate::wf_log::WfNodeLoadStatus;
 use crate::wf_workflow::SagaId;
+use crate::SagaTemplate;
 use crate::WfLog;
-use crate::Workflow;
 use anyhow::anyhow;
 use core::future::Future;
 use futures::channel::mpsc;
@@ -276,7 +276,7 @@ struct TaskCompletion {
  */
 struct TaskParams {
     /** Handle to the workflow itself, used for metadata like the label */
-    workflow: Arc<Workflow>,
+    workflow: Arc<SagaTemplate>,
 
     /**
      * Handle to the workflow's live state
@@ -315,7 +315,7 @@ struct TaskParams {
 #[derive(Debug)]
 pub struct WfExecutor {
     // TODO This could probably be a reference instead.
-    workflow: Arc<Workflow>,
+    workflow: Arc<SagaTemplate>,
 
     creator: String,
 
@@ -336,7 +336,7 @@ enum RecoveryDirection {
 
 impl WfExecutor {
     /** Create an executor to run the given workflow. */
-    pub fn new(w: Arc<Workflow>, creator: &str) -> WfExecutor {
+    pub fn new(w: Arc<SagaTemplate>, creator: &str) -> WfExecutor {
         let saga_id = SagaId(Uuid::new_v4());
         let wflog = WfLog::new(creator, saga_id);
         WfExecutor::new_recover(w, wflog, creator).unwrap()
@@ -347,7 +347,7 @@ impl WfExecutor {
      * started, using the given log events.
      */
     pub fn new_recover(
-        workflow: Arc<Workflow>,
+        workflow: Arc<SagaTemplate>,
         wflog: WfLog,
         creator: &str,
     ) -> Result<WfExecutor, WfError> {
@@ -1121,7 +1121,7 @@ impl WfExecutor {
  */
 #[derive(Debug)]
 struct WfExecLiveState {
-    workflow: Arc<Workflow>,
+    workflow: Arc<SagaTemplate>,
     /** Overall execution state */
     exec_state: WfState,
 
@@ -1383,7 +1383,7 @@ fn recovery_validate_parent(
 pub struct WfContext {
     ancestor_tree: Arc<BTreeMap<String, Arc<JsonValue>>>,
     node_id: NodeIndex,
-    workflow: Arc<Workflow>,
+    workflow: Arc<SagaTemplate>,
     live_state: Arc<Mutex<WfExecLiveState>>,
     /* TODO-cleanup should not need a copy here */
     creator: String,
@@ -1427,7 +1427,10 @@ impl WfContext {
      * constructed what the whole graph looks like, instead of only knowing
      * about child workflows once we start executing the node that creates them.
      */
-    pub async fn child_workflow(&self, wf: Arc<Workflow>) -> Arc<WfExecutor> {
+    pub async fn child_workflow(
+        &self,
+        wf: Arc<SagaTemplate>,
+    ) -> Arc<WfExecutor> {
         /*
          * TODO Really we want this to reach into the parent WfExecutor and make
          * a record about this new execution.  This is mostly for observability

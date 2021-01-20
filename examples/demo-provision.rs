@@ -8,7 +8,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use structopt::StructOpt;
-use workflow_doodling::make_provision_workflow;
+use workflow_doodling::make_provision_saga;
 use workflow_doodling::WfExecutor;
 use workflow_doodling::WfLog;
 
@@ -53,7 +53,7 @@ enum Demo {
 
 async fn cmd_dot() -> Result<(), anyhow::Error> {
     let mut stdout = io::stdout();
-    let workflow = make_provision_workflow();
+    let workflow = make_provision_saga();
     workflow.print_dot(&mut stdout).unwrap();
     Ok(())
 }
@@ -64,7 +64,7 @@ async fn cmd_dot() -> Result<(), anyhow::Error> {
 
 async fn cmd_info() -> Result<(), anyhow::Error> {
     let mut stderr = io::stderr();
-    let workflow = make_provision_workflow();
+    let workflow = make_provision_saga();
     eprintln!("*** workflow definition ***");
     eprintln!("workflow graph: ");
     workflow.print_dot(&mut stderr).unwrap();
@@ -122,7 +122,7 @@ struct RunArgs {
 
 async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     let mut stderr = io::stderr();
-    let workflow = make_provision_workflow();
+    let workflow = make_provision_saga();
     let exec = if let Some(input_log_path) = &args.recover_from {
         eprintln!("recovering from log: {}", input_log_path.display());
 

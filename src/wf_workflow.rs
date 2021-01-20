@@ -43,21 +43,20 @@ impl fmt::Display for SagaId {
 }
 
 /**
- * Workflows help organize execution of a set of asynchronous tasks that can
- * fail
+ * Sagas help organize execution of a set of asynchronous tasks that can fail
  *
- * Each workflow is a directed acyclic graph (DAG) where each node implements
- * [`WfAction`].  With each node, there's typically an execution action and an
- * undo action.  Execution guarantees that eventually all workflow nodes will
- * complete successfully or else that any nodes whose actions may have run have
- * also had their undo action run.  This abstraction is based on the distributed
- * saga pattern.
+ * Each saga template is a directed acyclic graph (DAG) where each node
+ * implements [`WfAction`].  With each node, there's typically an execution
+ * action and an undo action.  Execution guarantees that eventually all saga
+ * nodes will complete successfully or else that any nodes whose actions may
+ * have run have also had their undo action run.  This abstraction is based on
+ * the distributed saga pattern.
  *
- * You define a workflow using [`WfBuilder`].  You can execute a workflow as
- * many times as you want using [`WfExecutor`].
+ * You define a saga template using [`SagaTemplateBuilder`].  You can execute a
+ * saga as many times as you want using [`SagaExecutor`].
  */
 #[derive(Debug)]
-pub struct Workflow {
+pub struct SagaTemplate {
     /** describes the nodes in the graph and their dependencies */
     pub(crate) graph: Graph<String, ()>,
     /** action associated with each node in the graph */
@@ -72,7 +71,7 @@ pub struct Workflow {
     pub(crate) end_node: NodeIndex,
 }
 
-impl Workflow {
+impl SagaTemplate {
     pub fn node_for_name(
         &self,
         target_name: &str,
@@ -83,8 +82,8 @@ impl Workflow {
             }
         }
 
-        /* TODO-debug workflows should have names, too */
-        Err(anyhow!("workflow has no node named \"{}\"", target_name))
+        /* TODO-debug saga templates should have names, too */
+        Err(anyhow!("saga template has no node named \"{}\"", target_name))
     }
 
     /*
@@ -99,14 +98,15 @@ impl Workflow {
 }
 
 /**
- * Builder for constructing a Workflow
+ * Builder for constructing a SagaTemplate
  *
  * The interface here only supports linear construction using an "append"
- * operation.  See [`WfBuilder::append`] and [`WfBuilder::append_parallel`].
+ * operation.  See [`SagaTemplateBuilder::append`] and
+ * [`SagaTemplateBuilder::append_parallel`].
  */
 #[derive(Debug)]
-pub struct WfBuilder {
-    /** DAG of workflow nodes.  Weights for nodes are debug labels. */
+pub struct SagaTemplateBuilder {
+    /** DAG of saga nodes.  Weights for nodes are debug labels. */
     graph: Graph<String, ()>,
     /** For each node, the [`WfAction`] executed at that node. */
     launchers: BTreeMap<NodeIndex, Arc<dyn WfAction>>,
@@ -123,8 +123,8 @@ pub struct WfBuilder {
     last_added: Vec<NodeIndex>,
 }
 
-impl WfBuilder {
-    pub fn new() -> WfBuilder {
+impl SagaTemplateBuilder {
+    pub fn new() -> SagaTemplateBuilder {
         let mut graph = Graph::new();
         let mut launchers = BTreeMap::new();
         let node_names = BTreeMap::new();
@@ -134,7 +134,7 @@ impl WfBuilder {
         let root = graph.add_node(label);
         launchers.insert(root, first).expect_none("empty map had an element");
 
-        WfBuilder {
+        SagaTemplateBuilder {
             graph,
             launchers,
             root,
@@ -170,10 +170,10 @@ impl WfBuilder {
         /* TODO-correctness this doesn't check name uniqueness! */
         self.node_names
             .insert(newnode, name.to_string())
-            .expect_none("name already used in this workflow");
+            .expect_none("name already used in this saga template");
         self.node_labels
             .insert(newnode, label.to_string())
-            .expect_none("labels already used in this workflow");
+            .expect_none("labels already used in this saga template");
         for node in &self.last_added {
             self.graph.add_edge(*node, newnode, ());
         }
@@ -203,7 +203,7 @@ impl WfBuilder {
                 /* TODO-correctness does not validate the name! */
                 self.node_names
                     .insert(node, n.to_string())
-                    .expect_none("name already used in this workflow");
+                    .expect_none("name already used in this saga template");
                 self.node_labels
                     .insert(node, l.to_string())
                     .expect_none("node already has a label");
@@ -235,10 +235,10 @@ impl WfBuilder {
         self.last_added = newnodes;
     }
 
-    /** Finishes building the Workflow */
-    pub fn build(mut self) -> Workflow {
+    /** Finishes building the saga template */
+    pub fn build(mut self) -> SagaTemplate {
         /*
-         * Append an "end" node so that we can easily tell when the workflow has
+         * Append an "end" node so that we can easily tell when the saga has
          * completed.
          */
         let last: Arc<dyn WfAction + 'static> = Arc::new(WfActionEndNode {});
@@ -254,7 +254,7 @@ impl WfBuilder {
             self.graph.add_edge(*node, newnode, ());
         }
 
-        Workflow {
+        SagaTemplate {
             graph: self.graph,
             launchers: self.launchers,
             node_names: self.node_names,

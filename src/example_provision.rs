@@ -3,10 +3,10 @@
  */
 
 use crate::new_action_noop_undo;
-use crate::WfBuilder;
+use crate::SagaTemplate;
+use crate::SagaTemplateBuilder;
 use crate::WfContext;
 use crate::WfFuncResult;
-use crate::Workflow;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
@@ -39,8 +39,8 @@ use std::sync::Arc;
 /*
  * Construct a demo "provision" workflow matching the description above.
  */
-pub fn make_provision_workflow() -> Arc<Workflow> {
-    let mut w = WfBuilder::new();
+pub fn make_provision_saga() -> Arc<SagaTemplate> {
+    let mut w = SagaTemplateBuilder::new();
 
     w.append(
         "instance_id",
@@ -106,7 +106,7 @@ async fn demo_prov_vpc_alloc_ip(wfctx: WfContext) -> WfFuncResult<String> {
 async fn demo_prov_server_alloc(wfctx: WfContext) -> WfFuncResult<u64> {
     eprintln!("running action: {}", wfctx.node_label());
 
-    let mut w = WfBuilder::new();
+    let mut w = SagaTemplateBuilder::new();
     w.append(
         "server_id",
         "ServerPick",
