@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use structopt::StructOpt;
 use workflow_doodling::make_provision_saga;
+use workflow_doodling::SagaLog;
 use workflow_doodling::WfExecutor;
-use workflow_doodling::WfLog;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -90,10 +90,10 @@ async fn cmd_print_log(args: &PrintLogArgs) -> Result<(), anyhow::Error> {
     let file = fs::File::open(input_log_path).with_context(|| {
         format!("open recovery log \"{}\"", input_log_path.display())
     })?;
-    let wflog = WfLog::load("unused", file).with_context(|| {
+    let sglog = SagaLog::load("unused", file).with_context(|| {
         format!("load log \"{}\"", input_log_path.display())
     })?;
-    eprintln!("{:?}", wflog);
+    eprintln!("{:?}", sglog);
     Ok(())
 }
 
@@ -129,12 +129,12 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         let file = fs::File::open(&input_log_path).with_context(|| {
             format!("open recovery log \"{}\"", input_log_path.display())
         })?;
-        let wflog = WfLog::load(&args.creator, file).with_context(|| {
+        let sglog = SagaLog::load(&args.creator, file).with_context(|| {
             format!("load log \"{}\"", input_log_path.display())
         })?;
         let exec = WfExecutor::new_recover(
             Arc::clone(&workflow),
-            wflog,
+            sglog,
             &args.creator,
         )
         .with_context(|| {
@@ -167,7 +167,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
 
     if let Some(output_log_path) = &args.dump_to {
         let result = exec.result();
-        let log = result.wflog;
+        let log = result.sglog;
         let out = fs::OpenOptions::new()
             .write(true)
             .create_new(true)

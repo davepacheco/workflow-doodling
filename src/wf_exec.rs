@@ -8,8 +8,8 @@ use crate::wf_action::WfError;
 use crate::wf_log::WfNodeEventType;
 use crate::wf_log::WfNodeLoadStatus;
 use crate::wf_workflow::SagaId;
+use crate::SagaLog;
 use crate::SagaTemplate;
-use crate::WfLog;
 use anyhow::anyhow;
 use core::future::Future;
 use futures::channel::mpsc;
@@ -338,8 +338,8 @@ impl WfExecutor {
     /** Create an executor to run the given workflow. */
     pub fn new(w: Arc<SagaTemplate>, creator: &str) -> WfExecutor {
         let saga_id = SagaId(Uuid::new_v4());
-        let wflog = WfLog::new(creator, saga_id);
-        WfExecutor::new_recover(w, wflog, creator).unwrap()
+        let sglog = SagaLog::new(creator, saga_id);
+        WfExecutor::new_recover(w, sglog, creator).unwrap()
     }
 
     /**
@@ -348,7 +348,7 @@ impl WfExecutor {
      */
     pub fn new_recover(
         workflow: Arc<SagaTemplate>,
-        wflog: WfLog,
+        sglog: SagaLog,
         creator: &str,
     ) -> Result<WfExecutor, WfError> {
         /*
@@ -361,8 +361,8 @@ impl WfExecutor {
          * this code right here (which walks each node of the graph exactly
          * once), not a result of corrupted database state.
          */
-        let saga_id = wflog.saga_id;
-        let forward = !wflog.unwinding;
+        let saga_id = sglog.saga_id;
+        let forward = !sglog.unwinding;
         let mut live_state = WfExecLiveState {
             workflow: Arc::clone(&workflow),
             exec_state: if forward { WfState::Running } else { WfState::Done },
@@ -372,7 +372,7 @@ impl WfExecutor {
             node_outputs: BTreeMap::new(),
             nodes_undone: BTreeMap::new(),
             child_workflows: BTreeMap::new(),
-            wflog: wflog,
+            sglog: sglog,
             injected_errors: BTreeSet::new(),
         };
         let mut loaded = BTreeSet::new();
@@ -393,7 +393,7 @@ impl WfExecutor {
 
         for node_id in graph_nodes {
             let node_status =
-                live_state.wflog.load_status_for_node(node_id.index() as u64);
+                live_state.sglog.load_status_for_node(node_id.index() as u64);
 
             /*
              * Validate this node's state against its parent nodes' states.  By
@@ -402,7 +402,7 @@ impl WfExecutor {
              */
             for parent in workflow.graph.neighbors_directed(node_id, Incoming) {
                 let parent_status = live_state
-                    .wflog
+                    .sglog
                     .load_status_for_node(parent.index() as u64);
                 if !recovery_validate_parent(parent_status, node_status) {
                     return Err(anyhow!(
@@ -627,12 +627,12 @@ impl WfExecutor {
     // TODO Decide what we want to do if this actually fails and handle it
     // properly.
     async fn record_now(
-        wflog: &mut WfLog,
+        sglog: &mut SagaLog,
         node: NodeIndex,
         event_type: WfNodeEventType,
     ) {
         let node_id = node.index() as u64;
-        wflog.record_now(node_id, event_type).await.unwrap();
+        sglog.record_now(node_id, event_type).await.unwrap();
     }
 
     /**
@@ -829,11 +829,11 @@ impl WfExecutor {
              */
             let mut live_state = task_params.live_state.lock().await;
             let load_status =
-                live_state.wflog.load_status_for_node(node_id.index() as u64);
+                live_state.sglog.load_status_for_node(node_id.index() as u64);
             match load_status {
                 WfNodeLoadStatus::NeverStarted => {
                     WfExecutor::record_now(
-                        &mut live_state.wflog,
+                        &mut live_state.sglog,
                         node_id,
                         WfNodeEventType::Started,
                     )
@@ -881,11 +881,11 @@ impl WfExecutor {
         {
             let mut live_state = task_params.live_state.lock().await;
             let load_status =
-                live_state.wflog.load_status_for_node(node_id.index() as u64);
+                live_state.sglog.load_status_for_node(node_id.index() as u64);
             match load_status {
                 WfNodeLoadStatus::Succeeded(_) => {
                     WfExecutor::record_now(
-                        &mut live_state.wflog,
+                        &mut live_state.sglog,
                         node_id,
                         WfNodeEventType::UndoStarted,
                     )
@@ -929,7 +929,7 @@ impl WfExecutor {
 
         {
             let mut live_state = task_params.live_state.lock().await;
-            WfExecutor::record_now(&mut live_state.wflog, node_id, event_type)
+            WfExecutor::record_now(&mut live_state.sglog, node_id, event_type)
                 .await;
         }
 
@@ -975,7 +975,7 @@ impl WfExecutor {
 
         WfExecResult {
             saga_id: self.saga_id,
-            wflog: live_state.wflog.clone(),
+            sglog: live_state.sglog.clone(),
             node_results,
             succeeded: true,
         }
@@ -1143,7 +1143,7 @@ struct WfExecLiveState {
     child_workflows: BTreeMap<NodeIndex, Vec<Arc<WfExecutor>>>,
 
     /** Persistent state */
-    wflog: WfLog,
+    sglog: SagaLog,
 
     /** Injected errors */
     injected_errors: BTreeSet<NodeIndex>,
@@ -1200,7 +1200,7 @@ impl WfExecLiveState {
          */
         let mut set: BTreeSet<WfNodeExecState> = BTreeSet::new();
         let load_status =
-            self.wflog.load_status_for_node(node_id.index() as u64);
+            self.sglog.load_status_for_node(node_id.index() as u64);
         if let Some(undo_mode) = self.nodes_undone.get(node_id) {
             set.insert(WfNodeExecState::Undone(*undo_mode));
         } else if self.node_outputs.contains_key(node_id) {
@@ -1262,7 +1262,7 @@ impl WfExecLiveState {
  */
 pub struct WfExecResult {
     pub saga_id: SagaId,
-    pub wflog: WfLog,
+    pub sglog: SagaLog,
     pub node_results: BTreeMap<String, WfActionResult>,
     succeeded: bool,
 }

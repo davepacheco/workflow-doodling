@@ -159,7 +159,7 @@ impl fmt::Debug for WfNodeEvent {
  * you're done with recovery.
  */
 #[derive(Clone)]
-pub struct WfLog {
+pub struct SagaLog {
     /* TODO-robustness include version here */
     pub saga_id: SagaId,
     pub unwinding: bool,
@@ -168,9 +168,9 @@ pub struct WfLog {
     node_status: BTreeMap<WfNodeId, WfNodeLoadStatus>,
 }
 
-impl WfLog {
-    pub fn new(creator: &str, saga_id: SagaId) -> WfLog {
-        WfLog {
+impl SagaLog {
+    pub fn new(creator: &str, saga_id: SagaId) -> SagaLog {
+        SagaLog {
             saga_id,
             creator: creator.to_string(),
             events: Vec::new(),
@@ -257,10 +257,10 @@ impl WfLog {
     pub fn load<R: Read>(
         creator: &str,
         reader: R,
-    ) -> Result<WfLog, anyhow::Error> {
+    ) -> Result<SagaLog, anyhow::Error> {
         let mut s: WfLogSerialized = serde_json::from_reader(reader)
             .with_context(|| "deserializing workflow log")?;
-        let mut wflog = WfLog::new(&creator, s.saga_id);
+        let mut sglog = SagaLog::new(&creator, s.saga_id);
 
         /*
          * Sort the events by the event type.  This ensures that if there's at
@@ -296,18 +296,18 @@ impl WfLog {
          * Replay the events for this workflow.
          */
         for event in s.events {
-            if event.saga_id != wflog.saga_id {
+            if event.saga_id != sglog.saga_id {
                 return Err(anyhow!(
                     "found an event in the log for a \
                     different workflow ({}) than the log's header ({})",
                     event.saga_id,
-                    wflog.saga_id
+                    sglog.saga_id
                 ));
             }
 
-            wflog.record(event).with_context(|| "recovering workflow log")?;
+            sglog.record(event).with_context(|| "recovering workflow log")?;
         }
-        Ok(wflog)
+        Ok(sglog)
     }
 }
 
@@ -319,7 +319,7 @@ struct WfLogSerialized {
     events: Vec<WfNodeEvent>,
 }
 
-impl fmt::Debug for WfLog {
+impl fmt::Debug for SagaLog {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "WORKFLOW LOG:\n")?;
         write!(f, "workflow execution id: {}\n", self.saga_id)?;
