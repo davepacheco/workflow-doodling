@@ -1,6 +1,6 @@
 //! Definition of Action trait, core implementations, and related facilities
 
-use crate::wf_exec::WfContext;
+use crate::wf_exec::SagaContext;
 use anyhow::anyhow;
 use anyhow::Context;
 use async_trait::async_trait;
@@ -93,13 +93,13 @@ pub trait WfAction: Debug + Send + Sync {
      * is the _only_ supported means of sharing state across actions within a
      * workflow.
      */
-    async fn do_it(&self, wfctx: WfContext) -> WfActionResult;
+    async fn do_it(&self, wfctx: SagaContext) -> WfActionResult;
 
     /**
      * Executes the compensation action for this workflow node, whatever that
      * is.
      */
-    async fn undo_it(&self, wfctx: WfContext) -> WfUndoResult;
+    async fn undo_it(&self, wfctx: SagaContext) -> WfUndoResult;
 }
 
 /*
@@ -112,12 +112,12 @@ pub struct WfActionStartNode {}
 
 #[async_trait]
 impl WfAction for WfActionStartNode {
-    async fn do_it(&self, _: WfContext) -> WfActionResult {
+    async fn do_it(&self, _: SagaContext) -> WfActionResult {
         eprintln!("<action for \"start\" node>");
         Ok(Arc::new(JsonValue::Null))
     }
 
-    async fn undo_it(&self, _: WfContext) -> WfUndoResult {
+    async fn undo_it(&self, _: SagaContext) -> WfUndoResult {
         eprintln!(
             "<undo for \"start\" node (workflow is nearly done unwinding)>"
         );
@@ -131,12 +131,12 @@ pub struct WfActionEndNode {}
 
 #[async_trait]
 impl WfAction for WfActionEndNode {
-    async fn do_it(&self, _: WfContext) -> WfActionResult {
+    async fn do_it(&self, _: SagaContext) -> WfActionResult {
         eprintln!("<action for \"end\" node: workflow is nearly done>");
         Ok(Arc::new(JsonValue::Null))
     }
 
-    async fn undo_it(&self, _: WfContext) -> WfUndoResult {
+    async fn undo_it(&self, _: SagaContext) -> WfUndoResult {
         /*
          * We should not run compensation actions for nodes that have not
          * started.  We should never start this node unless all other actions
@@ -153,7 +153,7 @@ pub struct WfActionInjectError {}
 
 #[async_trait]
 impl WfAction for WfActionInjectError {
-    async fn do_it(&self, wfctx: WfContext) -> WfActionResult {
+    async fn do_it(&self, wfctx: SagaContext) -> WfActionResult {
         let message = format!(
             "<boom! error injected instead of action for \
             node \"{}\">",
@@ -163,7 +163,7 @@ impl WfAction for WfActionInjectError {
         Err(anyhow!("{}", message))
     }
 
-    async fn undo_it(&self, _: WfContext) -> WfUndoResult {
+    async fn undo_it(&self, _: SagaContext) -> WfUndoResult {
         /* We should never undo an action that failed. */
         unimplemented!();
     }
@@ -188,11 +188,11 @@ pub struct WfActionFunc<
     UndoFutType,
     UndoFuncType,
 > where
-    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
+    ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType:
         Future<Output = WfFuncResult<ActionFuncOutput>> + Send + Sync + 'static,
     ActionFuncOutput: WfActionOutput + 'static,
-    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
     UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
 {
     action_func: ActionFuncType,
@@ -215,11 +215,11 @@ impl<
         UndoFuncType,
     >
 where
-    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
+    ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType:
         Future<Output = WfFuncResult<ActionFuncOutput>> + Send + Sync + 'static,
     ActionFuncOutput: WfActionOutput + 'static,
-    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
     UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
 {
     /**
@@ -243,7 +243,7 @@ where
  * TODO-cleanup why can't new_action_noop_undo live in the WfAction namespace?
  */
 
-async fn undo_noop(wfctx: WfContext) -> WfUndoResult {
+async fn undo_noop(wfctx: SagaContext) -> WfUndoResult {
     eprintln!("<noop undo for node: \"{}\">", wfctx.node_label());
     Ok(())
 }
@@ -256,7 +256,7 @@ pub fn new_action_noop_undo<ActionFutType, ActionFuncType, ActionFuncOutput>(
     f: ActionFuncType,
 ) -> Arc<dyn WfAction>
 where
-    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
+    ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType:
         Future<Output = WfFuncResult<ActionFuncOutput>> + Send + Sync + 'static,
     ActionFuncOutput: WfActionOutput + 'static,
@@ -280,14 +280,14 @@ impl<
         UndoFuncType,
     >
 where
-    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
+    ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType:
         Future<Output = WfFuncResult<ActionFuncOutput>> + Send + Sync + 'static,
     ActionFuncOutput: WfActionOutput + 'static,
-    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
     UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
 {
-    async fn do_it(&self, wfctx: WfContext) -> WfActionResult {
+    async fn do_it(&self, wfctx: SagaContext) -> WfActionResult {
         let label = wfctx.node_label().to_owned();
         let fut = { (self.action_func)(wfctx) };
         /*
@@ -304,7 +304,7 @@ where
             .map(Arc::new)
     }
 
-    async fn undo_it(&self, wfctx: WfContext) -> WfUndoResult {
+    async fn undo_it(&self, wfctx: SagaContext) -> WfUndoResult {
         let fut = { (self.undo_func)(wfctx) };
         fut.await
     }
@@ -325,11 +325,11 @@ impl<
         UndoFuncType,
     >
 where
-    ActionFuncType: Fn(WfContext) -> ActionFutType + Send + Sync + 'static,
+    ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
     ActionFutType:
         Future<Output = WfFuncResult<ActionFuncOutput>> + Send + Sync + 'static,
     ActionFuncOutput: WfActionOutput + 'static,
-    UndoFuncType: Fn(WfContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
     UndoFutType: Future<Output = WfUndoResult> + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -3,9 +3,9 @@
  */
 
 use crate::new_action_noop_undo;
+use crate::SagaContext;
 use crate::SagaTemplate;
 use crate::SagaTemplateBuilder;
-use crate::WfContext;
 use crate::WfFuncResult;
 use serde::Deserialize;
 use serde::Serialize;
@@ -83,14 +83,14 @@ pub fn make_provision_saga() -> Arc<SagaTemplate> {
     Arc::new(w.build())
 }
 
-async fn demo_prov_instance_create(wfctx: WfContext) -> WfFuncResult<u64> {
+async fn demo_prov_instance_create(wfctx: SagaContext) -> WfFuncResult<u64> {
     eprintln!("running action: {}", wfctx.node_label());
     /* make up an instance ID */
     let instance_id = 1211u64;
     Ok(instance_id)
 }
 
-async fn demo_prov_vpc_alloc_ip(wfctx: WfContext) -> WfFuncResult<String> {
+async fn demo_prov_vpc_alloc_ip(wfctx: SagaContext) -> WfFuncResult<String> {
     eprintln!("running action: {}", wfctx.node_label());
     /* exercise using some data from a previous node */
     let instance_id = wfctx.lookup::<u64>("instance_id");
@@ -103,7 +103,7 @@ async fn demo_prov_vpc_alloc_ip(wfctx: WfContext) -> WfFuncResult<String> {
 /*
  * The next two steps are in a subworkflow!
  */
-async fn demo_prov_server_alloc(wfctx: WfContext) -> WfFuncResult<u64> {
+async fn demo_prov_server_alloc(wfctx: SagaContext) -> WfFuncResult<u64> {
     eprintln!("running action: {}", wfctx.node_label());
 
     let mut w = SagaTemplateBuilder::new();
@@ -132,7 +132,7 @@ struct ServerAllocResult {
     server_id: u64,
 }
 
-async fn demo_prov_server_pick(wfctx: WfContext) -> WfFuncResult<u64> {
+async fn demo_prov_server_pick(wfctx: SagaContext) -> WfFuncResult<u64> {
     eprintln!("running action: {}", wfctx.node_label());
     /* make up ("allocate") a new server id */
     let server_id = 1212u64;
@@ -140,7 +140,7 @@ async fn demo_prov_server_pick(wfctx: WfContext) -> WfFuncResult<u64> {
 }
 
 async fn demo_prov_server_reserve(
-    wfctx: WfContext,
+    wfctx: SagaContext,
 ) -> WfFuncResult<ServerAllocResult> {
     eprintln!("running action: {}", wfctx.node_label());
     /* exercise using data from previous nodes */
@@ -150,7 +150,7 @@ async fn demo_prov_server_reserve(
     Ok(ServerAllocResult { server_id })
 }
 
-async fn demo_prov_volume_create(wfctx: WfContext) -> WfFuncResult<u64> {
+async fn demo_prov_volume_create(wfctx: SagaContext) -> WfFuncResult<u64> {
     eprintln!("running action: {}", wfctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
@@ -158,7 +158,7 @@ async fn demo_prov_volume_create(wfctx: WfContext) -> WfFuncResult<u64> {
     let volume_id = 1213u64;
     Ok(volume_id)
 }
-async fn demo_prov_instance_configure(wfctx: WfContext) -> WfFuncResult<()> {
+async fn demo_prov_instance_configure(wfctx: SagaContext) -> WfFuncResult<()> {
     eprintln!("running action: {}", wfctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
@@ -166,7 +166,7 @@ async fn demo_prov_instance_configure(wfctx: WfContext) -> WfFuncResult<()> {
     assert_eq!(wfctx.lookup::<u64>("volume_id"), 1213);
     Ok(())
 }
-async fn demo_prov_volume_attach(wfctx: WfContext) -> WfFuncResult<()> {
+async fn demo_prov_volume_attach(wfctx: SagaContext) -> WfFuncResult<()> {
     eprintln!("running action: {}", wfctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
@@ -174,7 +174,7 @@ async fn demo_prov_volume_attach(wfctx: WfContext) -> WfFuncResult<()> {
     assert_eq!(wfctx.lookup::<u64>("volume_id"), 1213);
     Ok(())
 }
-async fn demo_prov_instance_boot(wfctx: WfContext) -> WfFuncResult<()> {
+async fn demo_prov_instance_boot(wfctx: SagaContext) -> WfFuncResult<()> {
     eprintln!("running action: {}", wfctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(wfctx.lookup::<u64>("instance_id"), 1211);
@@ -183,7 +183,7 @@ async fn demo_prov_instance_boot(wfctx: WfContext) -> WfFuncResult<()> {
     Ok(())
 }
 
-async fn demo_prov_print(wfctx: WfContext) -> WfFuncResult<()> {
+async fn demo_prov_print(wfctx: SagaContext) -> WfFuncResult<()> {
     eprintln!("running action: {}", wfctx.node_label());
     eprintln!("printing final state:");
     let instance_id = wfctx.lookup::<u64>("instance_id");

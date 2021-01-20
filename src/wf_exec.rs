@@ -849,7 +849,7 @@ impl SagaExecutor {
             }
         }
 
-        let exec_future = task_params.action.do_it(WfContext {
+        let exec_future = task_params.action.do_it(SagaContext {
             ancestor_tree: Arc::clone(&task_params.ancestor_tree),
             node_id,
             live_state: Arc::clone(&task_params.live_state),
@@ -901,7 +901,7 @@ impl SagaExecutor {
             }
         }
 
-        let exec_future = task_params.action.undo_it(WfContext {
+        let exec_future = task_params.action.undo_it(SagaContext {
             ancestor_tree: Arc::clone(&task_params.ancestor_tree),
             node_id,
             live_state: Arc::clone(&task_params.live_state),
@@ -1384,7 +1384,7 @@ fn recovery_validate_parent(
  * Any APIs that are useful for actions should hang off this object.  It should
  * have enough state to know which node is invoking the API.
  */
-pub struct WfContext {
+pub struct SagaContext {
     ancestor_tree: Arc<BTreeMap<String, Arc<JsonValue>>>,
     node_id: NodeIndex,
     workflow: Arc<SagaTemplate>,
@@ -1393,7 +1393,7 @@ pub struct WfContext {
     creator: String,
 }
 
-impl WfContext {
+impl SagaContext {
     /**
      * Retrieves a piece of data stored by a previous (ancestor) node in the
      * current workflow.  The data is identified by `name`.
