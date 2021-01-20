@@ -1,4 +1,4 @@
-//! Facilities for constructing workflow graphs
+//! Facilities for constructing saga graphs
 
 use crate::wf_action::WfAction;
 use crate::wf_action::WfActionEndNode;
@@ -7,18 +7,40 @@ use anyhow::anyhow;
 use petgraph::dot;
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/** Unique identifier for a Workflow */
+/** Unique identifier for a Saga Template */
 /*
- * TODO-cleanup make this a "newtype".  We may want the display form to have a
- * "w-" prefix (or something like that).  (Does that mean the type needs to be
- * caller-provided?)
+ * TODO-design We may want the display form to have a "st-" prefix or something
+ * like that.  (Does that mean the type needs to be caller-provided?)
  */
-pub type WfId = Uuid;
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize,
+)]
+pub struct SagaTemplateId(pub Uuid);
+impl fmt::Display for SagaTemplateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "sgt-{}", self.0)
+    }
+}
+
+/** Unique identifier for a Saga (an execution of a saga template) */
+/* TODO-design Same as for Saga Template */
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize,
+)]
+pub struct SagaId(pub Uuid);
+impl fmt::Display for SagaId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "sg-{}", self.0)
+    }
+}
 
 /**
  * Workflows help organize execution of a set of asynchronous tasks that can

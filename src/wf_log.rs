@@ -1,7 +1,7 @@
 //! Persistent state for workflows
 
+use crate::wf_workflow::SagaId;
 use crate::WfError;
-use crate::WfId;
 use anyhow::anyhow;
 use anyhow::Context;
 use chrono::DateTime;
@@ -121,8 +121,8 @@ impl WfNodeLoadStatus {
  */
 #[derive(Clone, Deserialize, Serialize)]
 pub struct WfNodeEvent {
-    /** id of the workflow */
-    workflow_id: WfId,
+    /** id of the saga */
+    saga_id: SagaId,
     /** id of the workflow node */
     node_id: WfNodeId,
     /** what's indicated by this event */
@@ -161,7 +161,7 @@ impl fmt::Debug for WfNodeEvent {
 #[derive(Clone)]
 pub struct WfLog {
     /* TODO-robustness include version here */
-    pub workflow_id: WfId,
+    pub saga_id: SagaId,
     pub unwinding: bool,
     creator: String,
     events: Vec<WfNodeEvent>,
@@ -169,9 +169,9 @@ pub struct WfLog {
 }
 
 impl WfLog {
-    pub fn new(creator: &str, workflow_id: WfId) -> WfLog {
+    pub fn new(creator: &str, saga_id: SagaId) -> WfLog {
         WfLog {
-            workflow_id,
+            saga_id,
             creator: creator.to_string(),
             events: Vec::new(),
             node_status: BTreeMap::new(),
@@ -185,7 +185,7 @@ impl WfLog {
         event_type: WfNodeEventType,
     ) -> impl core::future::Future<Output = WfLogResult> {
         let event = WfNodeEvent {
-            workflow_id: self.workflow_id,
+            saga_id: self.saga_id,
             node_id,
             event_time: Utc::now(),
             event_type,
@@ -236,13 +236,13 @@ impl WfLog {
     pub fn dump<W: Write>(&self, writer: W) -> Result<(), anyhow::Error> {
         /* TODO-cleanup can we avoid these clones? */
         let s = WfLogSerialized {
-            workflow_id: self.workflow_id,
+            saga_id: self.saga_id,
             creator: self.creator.clone(),
             events: self.events.clone(),
         };
 
         serde_json::to_writer_pretty(writer, &s).with_context(|| {
-            format!("serializing log for workflow {}", self.workflow_id)
+            format!("serializing log for workflow {}", self.saga_id)
         })
     }
 
@@ -260,7 +260,7 @@ impl WfLog {
     ) -> Result<WfLog, anyhow::Error> {
         let mut s: WfLogSerialized = serde_json::from_reader(reader)
             .with_context(|| "deserializing workflow log")?;
-        let mut wflog = WfLog::new(&creator, s.workflow_id);
+        let mut wflog = WfLog::new(&creator, s.saga_id);
 
         /*
          * Sort the events by the event type.  This ensures that if there's at
@@ -296,12 +296,12 @@ impl WfLog {
          * Replay the events for this workflow.
          */
         for event in s.events {
-            if event.workflow_id != wflog.workflow_id {
+            if event.saga_id != wflog.saga_id {
                 return Err(anyhow!(
                     "found an event in the log for a \
                     different workflow ({}) than the log's header ({})",
-                    event.workflow_id,
-                    wflog.workflow_id
+                    event.saga_id,
+                    wflog.saga_id
                 ));
             }
 
@@ -314,7 +314,7 @@ impl WfLog {
 #[derive(Deserialize, Serialize)]
 struct WfLogSerialized {
     /* TODO-robustness add version */
-    workflow_id: WfId,
+    saga_id: SagaId,
     creator: String,
     events: Vec<WfNodeEvent>,
 }
@@ -322,7 +322,7 @@ struct WfLogSerialized {
 impl fmt::Debug for WfLog {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "WORKFLOW LOG:\n")?;
-        write!(f, "workflow execution id: {}\n", self.workflow_id)?;
+        write!(f, "workflow execution id: {}\n", self.saga_id)?;
         write!(f, "creator:               {}\n", self.creator)?;
         write!(
             f,

@@ -21,5 +21,4 @@ pub use wf_exec::WfContext;
 pub use wf_exec::WfExecutor;
 pub use wf_log::WfLog;
 pub use wf_workflow::WfBuilder;
-pub use wf_workflow::WfId;
 pub use wf_workflow::Workflow;

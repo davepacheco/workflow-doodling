@@ -7,7 +7,7 @@ use crate::wf_action::WfActionResult;
 use crate::wf_action::WfError;
 use crate::wf_log::WfNodeEventType;
 use crate::wf_log::WfNodeLoadStatus;
-use crate::WfId;
+use crate::wf_workflow::SagaId;
 use crate::WfLog;
 use crate::Workflow;
 use anyhow::anyhow;
@@ -322,12 +322,8 @@ pub struct WfExecutor {
     /** Channel for monitoring execution completion */
     finish_tx: broadcast::Sender<()>,
 
-    /** Unique identifier for this execution */
-    // TODO The nomenclature is problematic here.  This is really a workflow
-    // _execution_ id.  Or maybe Workflows are really WorkflowTemplates?  Either
-    // way, this identifies something different than what we currently call
-    // Workflows.
-    workflow_id: WfId,
+    /** Unique identifier for this saga (an execution of a saga template) */
+    saga_id: SagaId,
 
     live_state: Arc<Mutex<WfExecLiveState>>,
 }
@@ -341,8 +337,8 @@ enum RecoveryDirection {
 impl WfExecutor {
     /** Create an executor to run the given workflow. */
     pub fn new(w: Arc<Workflow>, creator: &str) -> WfExecutor {
-        let workflow_id = Uuid::new_v4();
-        let wflog = WfLog::new(creator, workflow_id);
+        let saga_id = SagaId(Uuid::new_v4());
+        let wflog = WfLog::new(creator, saga_id);
         WfExecutor::new_recover(w, wflog, creator).unwrap()
     }
 
@@ -365,7 +361,7 @@ impl WfExecutor {
          * this code right here (which walks each node of the graph exactly
          * once), not a result of corrupted database state.
          */
-        let workflow_id = wflog.workflow_id;
+        let saga_id = wflog.saga_id;
         let forward = !wflog.unwinding;
         let mut live_state = WfExecLiveState {
             workflow: Arc::clone(&workflow),
@@ -410,10 +406,10 @@ impl WfExecutor {
                     .load_status_for_node(parent.index() as u64);
                 if !recovery_validate_parent(parent_status, node_status) {
                     return Err(anyhow!(
-                        "recovery for workflow {}: node {:?}: \
+                        "recovery for saga {}: node {:?}: \
                         load status is \"{:?}\", which is illegal for \
                         parent load status \"{:?}\"",
-                        workflow_id,
+                        saga_id,
                         node_id,
                         node_status,
                         parent_status,
@@ -560,7 +556,7 @@ impl WfExecutor {
         Ok(WfExecutor {
             workflow,
             creator: creator.to_owned(),
-            workflow_id,
+            saga_id,
             finish_tx,
             live_state: Arc::new(Mutex::new(live_state)),
         })
@@ -978,7 +974,7 @@ impl WfExecutor {
         }
 
         WfExecResult {
-            workflow_id: self.workflow_id,
+            saga_id: self.saga_id,
             wflog: live_state.wflog.clone(),
             node_results,
             succeeded: true,
@@ -1044,7 +1040,7 @@ impl WfExecutor {
                 out,
                 "{:width$}+ workflow execution: {}\n",
                 "",
-                self.workflow_id,
+                self.saga_id,
                 width = big_indent
             )?;
             for (d, nodes) in nodes_at_depth {
@@ -1265,7 +1261,7 @@ impl WfExecLiveState {
  * Summarizes the final state of a workflow execution.
  */
 pub struct WfExecResult {
-    pub workflow_id: WfId,
+    pub saga_id: SagaId,
     pub wflog: WfLog,
     pub node_results: BTreeMap<String, WfActionResult>,
     succeeded: bool,
@@ -1281,7 +1277,7 @@ impl WfExecResult {
                 "fetch output \"{}\" from workflow execution \
                 \"{}\": workflow did not complete successfully",
                 name,
-                self.workflow_id
+                self.saga_id
             ));
         }
 
