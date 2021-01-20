@@ -57,7 +57,7 @@ impl WfNodeStateType for WfnsUndone {}
 
 /* TODO-design Is this right?  Is the trait supposed to be empty? */
 trait WfNodeRest: Send + Sync {
-    fn propagate(&self, exec: &WfExecutor, live_state: &mut WfExecLiveState);
+    fn propagate(&self, exec: &SagaExecutor, live_state: &mut WfExecLiveState);
     fn log_event(&self) -> WfNodeEventType;
 }
 
@@ -66,7 +66,7 @@ impl WfNodeRest for WfNode<WfnsDone> {
         WfNodeEventType::Succeeded(Arc::clone(&self.state.0))
     }
 
-    fn propagate(&self, exec: &WfExecutor, live_state: &mut WfExecLiveState) {
+    fn propagate(&self, exec: &SagaExecutor, live_state: &mut WfExecLiveState) {
         let graph = &exec.workflow.graph;
         live_state
             .node_outputs
@@ -117,7 +117,7 @@ impl WfNodeRest for WfNode<WfnsFailed> {
         WfNodeEventType::Failed
     }
 
-    fn propagate(&self, exec: &WfExecutor, live_state: &mut WfExecLiveState) {
+    fn propagate(&self, exec: &SagaExecutor, live_state: &mut WfExecLiveState) {
         let graph = &exec.workflow.graph;
 
         if live_state.exec_state == WfState::Unwinding {
@@ -161,7 +161,7 @@ impl WfNodeRest for WfNode<WfnsUndone> {
         WfNodeEventType::UndoFinished
     }
 
-    fn propagate(&self, exec: &WfExecutor, live_state: &mut WfExecLiveState) {
+    fn propagate(&self, exec: &SagaExecutor, live_state: &mut WfExecLiveState) {
         let graph = &exec.workflow.graph;
         assert_eq!(live_state.exec_state, WfState::Unwinding);
         live_state
@@ -313,7 +313,7 @@ struct TaskParams {
  * etc.
  */
 #[derive(Debug)]
-pub struct WfExecutor {
+pub struct SagaExecutor {
     // TODO This could probably be a reference instead.
     workflow: Arc<SagaTemplate>,
 
@@ -334,12 +334,12 @@ enum RecoveryDirection {
     Unwind(bool),
 }
 
-impl WfExecutor {
+impl SagaExecutor {
     /** Create an executor to run the given workflow. */
-    pub fn new(w: Arc<SagaTemplate>, creator: &str) -> WfExecutor {
+    pub fn new(w: Arc<SagaTemplate>, creator: &str) -> SagaExecutor {
         let saga_id = SagaId(Uuid::new_v4());
         let sglog = SagaLog::new(creator, saga_id);
-        WfExecutor::new_recover(w, sglog, creator).unwrap()
+        SagaExecutor::new_recover(w, sglog, creator).unwrap()
     }
 
     /**
@@ -350,7 +350,7 @@ impl WfExecutor {
         workflow: Arc<SagaTemplate>,
         sglog: SagaLog,
         creator: &str,
-    ) -> Result<WfExecutor, WfError> {
+    ) -> Result<SagaExecutor, WfError> {
         /*
          * During recovery, there's a fine line between operational errors and
          * programmer errors.  If we discover semantically invalid workflow
@@ -553,7 +553,7 @@ impl WfExecutor {
 
         let (finish_tx, _) = broadcast::channel(1);
 
-        Ok(WfExecutor {
+        Ok(SagaExecutor {
             workflow,
             creator: creator.to_owned(),
             saga_id,
@@ -766,7 +766,7 @@ impl WfExecutor {
                 creator: self.creator.clone(),
             };
 
-            let task = tokio::spawn(WfExecutor::exec_node(task_params));
+            let task = tokio::spawn(SagaExecutor::exec_node(task_params));
             live_state.node_task(node_id, task);
         }
 
@@ -808,7 +808,7 @@ impl WfExecutor {
                 creator: self.creator.clone(),
             };
 
-            let task = tokio::spawn(WfExecutor::undo_node(task_params));
+            let task = tokio::spawn(SagaExecutor::undo_node(task_params));
             live_state.node_task(node_id, task);
         }
     }
@@ -832,7 +832,7 @@ impl WfExecutor {
                 live_state.sglog.load_status_for_node(node_id.index() as u64);
             match load_status {
                 WfNodeLoadStatus::NeverStarted => {
-                    WfExecutor::record_now(
+                    SagaExecutor::record_now(
                         &mut live_state.sglog,
                         node_id,
                         WfNodeEventType::Started,
@@ -864,7 +864,7 @@ impl WfExecutor {
             }
         };
 
-        WfExecutor::finish_task(task_params, node).await;
+        SagaExecutor::finish_task(task_params, node).await;
     }
 
     /**
@@ -884,7 +884,7 @@ impl WfExecutor {
                 live_state.sglog.load_status_for_node(node_id.index() as u64);
             match load_status {
                 WfNodeLoadStatus::Succeeded(_) => {
-                    WfExecutor::record_now(
+                    SagaExecutor::record_now(
                         &mut live_state.sglog,
                         node_id,
                         WfNodeEventType::UndoStarted,
@@ -917,7 +917,7 @@ impl WfExecutor {
             node_id,
             state: WfnsUndone(WfUndoMode::ActionUndone),
         });
-        WfExecutor::finish_task(task_params, node).await;
+        SagaExecutor::finish_task(task_params, node).await;
     }
 
     async fn finish_task(
@@ -929,8 +929,12 @@ impl WfExecutor {
 
         {
             let mut live_state = task_params.live_state.lock().await;
-            WfExecutor::record_now(&mut live_state.sglog, node_id, event_type)
-                .await;
+            SagaExecutor::record_now(
+                &mut live_state.sglog,
+                node_id,
+                event_type,
+            )
+            .await;
         }
 
         task_params
@@ -1140,7 +1144,7 @@ struct WfExecLiveState {
     nodes_undone: BTreeMap<NodeIndex, WfUndoMode>,
 
     /** Child workflows created by a node (for status and control) */
-    child_workflows: BTreeMap<NodeIndex, Vec<Arc<WfExecutor>>>,
+    child_workflows: BTreeMap<NodeIndex, Vec<Arc<SagaExecutor>>>,
 
     /** Persistent state */
     sglog: SagaLog,
@@ -1430,7 +1434,7 @@ impl WfContext {
     pub async fn child_workflow(
         &self,
         wf: Arc<SagaTemplate>,
-    ) -> Arc<WfExecutor> {
+    ) -> Arc<SagaExecutor> {
         /*
          * TODO Really we want this to reach into the parent WfExecutor and make
          * a record about this new execution.  This is mostly for observability
@@ -1438,7 +1442,7 @@ impl WfContext {
          * we'd like to give details on this child workflow.  Similarly if they
          * pause the parent, that should pause the child one.
          */
-        let e = Arc::new(WfExecutor::new(wf, &self.creator));
+        let e = Arc::new(SagaExecutor::new(wf, &self.creator));
         /* TODO-correctness Prove the lock ordering is okay here .*/
         self.live_state
             .lock()

@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use structopt::StructOpt;
 use workflow_doodling::make_provision_saga;
+use workflow_doodling::SagaExecutor;
 use workflow_doodling::SagaLog;
-use workflow_doodling::WfExecutor;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -70,7 +70,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     workflow.print_dot(&mut stderr).unwrap();
 
     eprintln!("*** initial state ***");
-    let exec = WfExecutor::new(workflow, "provision-info");
+    let exec = SagaExecutor::new(workflow, "provision-info");
     exec.print_status(&mut stderr, 0).await.unwrap();
     Ok(())
 }
@@ -132,7 +132,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         let sglog = SagaLog::load(&args.creator, file).with_context(|| {
             format!("load log \"{}\"", input_log_path.display())
         })?;
-        let exec = WfExecutor::new_recover(
+        let exec = SagaExecutor::new_recover(
             Arc::clone(&workflow),
             sglog,
             &args.creator,
@@ -146,7 +146,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         eprintln!("");
         exec
     } else {
-        WfExecutor::new(Arc::clone(&workflow), &args.creator)
+        SagaExecutor::new(Arc::clone(&workflow), &args.creator)
     };
 
     for node_name in &args.inject_error {
