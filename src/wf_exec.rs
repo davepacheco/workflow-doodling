@@ -41,32 +41,40 @@ use uuid::Uuid;
  * children (to notify when undone), and to each direction as well?  Then the
  * whole thing is a message passing exercise?
  */
-struct WfnsDone(Arc<JsonValue>);
-struct WfnsFailed(WfError);
-struct WfnsUndone(WfUndoMode);
+struct SgnsDone(Arc<JsonValue>);
+struct SgnsFailed(WfError);
+struct SgnsUndone(SagaUndoMode);
 
-struct WfNode<S: WfNodeStateType> {
+struct SagaNode<S: SagaNodeStateType> {
     node_id: NodeIndex,
     state: S,
 }
 
-trait WfNodeStateType {}
-impl WfNodeStateType for WfnsDone {}
-impl WfNodeStateType for WfnsFailed {}
-impl WfNodeStateType for WfnsUndone {}
+trait SagaNodeStateType {}
+impl SagaNodeStateType for SgnsDone {}
+impl SagaNodeStateType for SgnsFailed {}
+impl SagaNodeStateType for SgnsUndone {}
 
 /* TODO-design Is this right?  Is the trait supposed to be empty? */
-trait WfNodeRest: Send + Sync {
-    fn propagate(&self, exec: &SagaExecutor, live_state: &mut WfExecLiveState);
+trait SagaNodeRest: Send + Sync {
+    fn propagate(
+        &self,
+        exec: &SagaExecutor,
+        live_state: &mut SagaExecLiveState,
+    );
     fn log_event(&self) -> WfNodeEventType;
 }
 
-impl WfNodeRest for WfNode<WfnsDone> {
+impl SagaNodeRest for SagaNode<SgnsDone> {
     fn log_event(&self) -> WfNodeEventType {
         WfNodeEventType::Succeeded(Arc::clone(&self.state.0))
     }
 
-    fn propagate(&self, exec: &SagaExecutor, live_state: &mut WfExecLiveState) {
+    fn propagate(
+        &self,
+        exec: &SagaExecutor,
+        live_state: &mut SagaExecLiveState,
+    ) {
         let graph = &exec.workflow.graph;
         live_state
             .node_outputs
@@ -77,13 +85,13 @@ impl WfNodeRest for WfNode<WfnsDone> {
             /*
              * If we've completed the last node, the workflow is done.
              */
-            assert_eq!(live_state.exec_state, WfState::Running);
+            assert_eq!(live_state.exec_state, SagaState::Running);
             assert_eq!(graph.node_count(), live_state.node_outputs.len());
             live_state.mark_workflow_done();
             return;
         }
 
-        if live_state.exec_state == WfState::Unwinding {
+        if live_state.exec_state == SagaState::Unwinding {
             /*
              * If the workflow is currently unwinding, then this node finishing
              * doesn't unblock any other nodes.  However, it potentially
@@ -112,15 +120,19 @@ impl WfNodeRest for WfNode<WfnsDone> {
     }
 }
 
-impl WfNodeRest for WfNode<WfnsFailed> {
+impl SagaNodeRest for SagaNode<SgnsFailed> {
     fn log_event(&self) -> WfNodeEventType {
         WfNodeEventType::Failed
     }
 
-    fn propagate(&self, exec: &SagaExecutor, live_state: &mut WfExecLiveState) {
+    fn propagate(
+        &self,
+        exec: &SagaExecutor,
+        live_state: &mut SagaExecLiveState,
+    ) {
         let graph = &exec.workflow.graph;
 
-        if live_state.exec_state == WfState::Unwinding {
+        if live_state.exec_state == SagaState::Unwinding {
             /*
              * This node failed while we're already unwinding.  We don't
              * need to kick off unwinding again.  We could in theory
@@ -134,9 +146,9 @@ impl WfNodeRest for WfNode<WfnsFailed> {
             if neighbors_all(graph, &self.node_id, Outgoing, |child| {
                 live_state.nodes_undone.contains_key(child)
             }) {
-                let new_node = WfNode {
+                let new_node = SagaNode {
                     node_id: self.node_id,
-                    state: WfnsUndone(WfUndoMode::ActionFailed),
+                    state: SgnsUndone(SagaUndoMode::ActionFailed),
                 };
                 new_node.propagate(exec, live_state);
             }
@@ -145,25 +157,29 @@ impl WfNodeRest for WfNode<WfnsFailed> {
              * Begin the unwinding process.  Start with the end node: mark
              * it trivially "undone" and propagate that.
              */
-            live_state.exec_state = WfState::Unwinding;
+            live_state.exec_state = SagaState::Unwinding;
             assert_ne!(self.node_id, exec.workflow.end_node);
-            let new_node = WfNode {
+            let new_node = SagaNode {
                 node_id: exec.workflow.end_node,
-                state: WfnsUndone(WfUndoMode::ActionNeverRan),
+                state: SgnsUndone(SagaUndoMode::ActionNeverRan),
             };
             new_node.propagate(exec, live_state);
         }
     }
 }
 
-impl WfNodeRest for WfNode<WfnsUndone> {
+impl SagaNodeRest for SagaNode<SgnsUndone> {
     fn log_event(&self) -> WfNodeEventType {
         WfNodeEventType::UndoFinished
     }
 
-    fn propagate(&self, exec: &SagaExecutor, live_state: &mut WfExecLiveState) {
+    fn propagate(
+        &self,
+        exec: &SagaExecutor,
+        live_state: &mut SagaExecLiveState,
+    ) {
         let graph = &exec.workflow.graph;
-        assert_eq!(live_state.exec_state, WfState::Unwinding);
+        assert_eq!(live_state.exec_state, SagaState::Unwinding);
         live_state
             .nodes_undone
             .insert(self.node_id, self.state.0)
@@ -198,26 +214,26 @@ impl WfNodeRest for WfNode<WfnsUndone> {
                      * If the node never started or if it failed, we can
                      * just mark it undone without doing anything else.
                      */
-                    WfNodeExecState::Blocked => {
-                        let new_node = WfNode {
+                    SagaNodeExecState::Blocked => {
+                        let new_node = SagaNode {
                             node_id: parent,
-                            state: WfnsUndone(WfUndoMode::ActionNeverRan),
+                            state: SgnsUndone(SagaUndoMode::ActionNeverRan),
                         };
                         new_node.propagate(exec, live_state);
                         continue;
                     }
 
-                    WfNodeExecState::Failed => {
-                        let new_node = WfNode {
+                    SagaNodeExecState::Failed => {
+                        let new_node = SagaNode {
                             node_id: parent,
-                            state: WfnsUndone(WfUndoMode::ActionFailed),
+                            state: SgnsUndone(SagaUndoMode::ActionFailed),
                         };
                         new_node.propagate(exec, live_state);
                         continue;
                     }
 
-                    WfNodeExecState::QueuedToRun
-                    | WfNodeExecState::TaskInProgress => {
+                    SagaNodeExecState::QueuedToRun
+                    | SagaNodeExecState::TaskInProgress => {
                         /*
                          * If we're running an action for this task, there's
                          * nothing we can do right now, but we'll handle it when
@@ -228,15 +244,15 @@ impl WfNodeRest for WfNode<WfnsUndone> {
                         continue;
                     }
 
-                    WfNodeExecState::Done => {
+                    SagaNodeExecState::Done => {
                         /*
                          * We have to actually run the undo action.
                          */
                         live_state.queue_undo.push(parent);
                     }
 
-                    WfNodeExecState::QueuedToUndo
-                    | WfNodeExecState::Undone(_) => {
+                    SagaNodeExecState::QueuedToUndo
+                    | SagaNodeExecState::Undone(_) => {
                         panic!(
                             "already undoing or undone node \
                             whose child was just now undone"
@@ -252,7 +268,7 @@ impl WfNodeRest for WfNode<WfnsUndone> {
  * Execution state for the workflow overall
  */
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum WfState {
+enum SagaState {
     Running,
     Unwinding,
     Done,
@@ -264,11 +280,11 @@ enum WfState {
  */
 struct TaskCompletion {
     /*
-     * TODO-cleanup can this be removed? The node field is a WfNode, which has a
-     * node_id.
+     * TODO-cleanup can this be removed? The node field is a SagaNode, which has
+     * a node_id.
      */
     node_id: NodeIndex,
-    node: Box<dyn WfNodeRest>,
+    node: Box<dyn SagaNodeRest>,
 }
 
 /**
@@ -284,7 +300,7 @@ struct TaskParams {
      * This is used only to update state for status purposes.  We want to avoid
      * any tight coupling between this task and the internal state.
      */
-    live_state: Arc<Mutex<WfExecLiveState>>,
+    live_state: Arc<Mutex<SagaExecLiveState>>,
 
     // TODO-cleanup should not need a copy here.
     creator: String,
@@ -325,7 +341,7 @@ pub struct SagaExecutor {
     /** Unique identifier for this saga (an execution of a saga template) */
     saga_id: SagaId,
 
-    live_state: Arc<Mutex<WfExecLiveState>>,
+    live_state: Arc<Mutex<SagaExecLiveState>>,
 }
 
 #[derive(Debug)]
@@ -363,9 +379,13 @@ impl SagaExecutor {
          */
         let saga_id = sglog.saga_id;
         let forward = !sglog.unwinding;
-        let mut live_state = WfExecLiveState {
+        let mut live_state = SagaExecLiveState {
             workflow: Arc::clone(&workflow),
-            exec_state: if forward { WfState::Running } else { WfState::Done },
+            exec_state: if forward {
+                SagaState::Running
+            } else {
+                SagaState::Done
+            },
             queue_todo: Vec::new(),
             queue_undo: Vec::new(),
             node_tasks: BTreeMap::new(),
@@ -459,8 +479,8 @@ impl SagaExecutor {
                              * it undone.
                              * TODO-design Does this suggest a better way to do
                              * this might be to simply load all the state that
-                             * we have into the WfExecLiveState and execute the
-                             * workflow as normal, but have normal execution
+                             * we have into the SagaExecLiveState and execute
+                             * the workflow as normal, but have normal execution
                              * check for cached values instead of running
                              * actions?  In a sense, this makes the recovery
                              * path look like the normal path rather than having
@@ -475,7 +495,7 @@ impl SagaExecutor {
                              */
                             live_state
                                 .nodes_undone
-                                .insert(node_id, WfUndoMode::ActionNeverRan);
+                                .insert(node_id, SagaUndoMode::ActionNeverRan);
                         }
                         _ => (),
                     }
@@ -512,7 +532,7 @@ impl SagaExecutor {
                     if let RecoveryDirection::Unwind(true) = direction {
                         live_state
                             .nodes_undone
-                            .insert(node_id, WfUndoMode::ActionFailed);
+                            .insert(node_id, SagaUndoMode::ActionFailed);
                     }
                 }
                 WfNodeLoadStatus::UndoStarted => {
@@ -531,7 +551,7 @@ impl SagaExecutor {
                     assert!(!forward);
                     live_state
                         .nodes_undone
-                        .insert(node_id, WfUndoMode::ActionUndone);
+                        .insert(node_id, SagaUndoMode::ActionUndone);
                 }
             }
 
@@ -574,7 +594,7 @@ impl SagaExecutor {
     fn make_ancestor_tree(
         &self,
         tree: &mut BTreeMap<String, Arc<JsonValue>>,
-        live_state: &WfExecLiveState,
+        live_state: &SagaExecLiveState,
         node: NodeIndex,
         include_self: bool,
     ) {
@@ -592,7 +612,7 @@ impl SagaExecutor {
     fn make_ancestor_tree_node(
         &self,
         tree: &mut BTreeMap<String, Arc<JsonValue>>,
-        live_state: &WfExecLiveState,
+        live_state: &SagaExecLiveState,
         node: NodeIndex,
     ) {
         if node == self.workflow.start_node {
@@ -651,7 +671,7 @@ impl SagaExecutor {
              * consumer has run() it (once).
              */
             let live_state = self.live_state.lock().await;
-            if live_state.exec_state == WfState::Done {
+            if live_state.exec_state == SagaState::Done {
                 self.finish_tx.send(()).expect("failed to send finish message");
                 return;
             }
@@ -693,13 +713,13 @@ impl SagaExecutor {
 
             let mut live_state = self.live_state.lock().await;
             message.node.propagate(&self, &mut live_state);
-            if live_state.exec_state == WfState::Done {
+            if live_state.exec_state == SagaState::Done {
                 break;
             }
         }
 
         let live_state = self.live_state.try_lock().unwrap();
-        assert_eq!(live_state.exec_state, WfState::Done);
+        assert_eq!(live_state.exec_state, SagaState::Done);
         self.finish_tx.send(()).expect("failed to send finish message");
     }
 
@@ -770,7 +790,7 @@ impl SagaExecutor {
             live_state.node_task(node_id, task);
         }
 
-        if live_state.exec_state == WfState::Running {
+        if live_state.exec_state == SagaState::Running {
             assert!(live_state.queue_undo.is_empty());
             return;
         }
@@ -857,10 +877,12 @@ impl SagaExecutor {
             creator: task_params.creator.clone(),
         });
         let result = exec_future.await;
-        let node: Box<dyn WfNodeRest> = match result {
-            Ok(output) => Box::new(WfNode { node_id, state: WfnsDone(output) }),
+        let node: Box<dyn SagaNodeRest> = match result {
+            Ok(output) => {
+                Box::new(SagaNode { node_id, state: SgnsDone(output) })
+            }
             Err(error) => {
-                Box::new(WfNode { node_id, state: WfnsFailed(error) })
+                Box::new(SagaNode { node_id, state: SgnsFailed(error) })
             }
         };
 
@@ -913,16 +935,16 @@ impl SagaExecutor {
          * what we want to do about it.
          */
         exec_future.await.unwrap();
-        let node = Box::new(WfNode {
+        let node = Box::new(SagaNode {
             node_id,
-            state: WfnsUndone(WfUndoMode::ActionUndone),
+            state: SgnsUndone(SagaUndoMode::ActionUndone),
         });
         SagaExecutor::finish_task(task_params, node).await;
     }
 
     async fn finish_task(
         mut task_params: TaskParams,
-        node: Box<dyn WfNodeRest>,
+        node: Box<dyn SagaNodeRest>,
     ) {
         let node_id = task_params.node_id;
         let event_type = node.log_event();
@@ -952,7 +974,7 @@ impl SagaExecutor {
         }
     }
 
-    pub fn result(&self) -> WfExecResult {
+    pub fn result(&self) -> SagaExecResult {
         /*
          * TODO-cleanup is there a way to make this safer?  If we could know
          * that there were no other references to the live_state (which should
@@ -963,7 +985,7 @@ impl SagaExecutor {
             .live_state
             .try_lock()
             .expect("attempted to get result while workflow still running?");
-        assert_eq!(live_state.exec_state, WfState::Done);
+        assert_eq!(live_state.exec_state, SagaState::Done);
 
         let mut node_results = BTreeMap::new();
         for (node_id, output) in &live_state.node_outputs {
@@ -977,7 +999,7 @@ impl SagaExecutor {
             node_results.insert(node_name.clone(), Ok(Arc::clone(output)));
         }
 
-        WfExecResult {
+        SagaExecResult {
             saga_id: self.saga_id,
             sglog: live_state.sglog.clone(),
             node_results,
@@ -1124,10 +1146,10 @@ impl SagaExecutor {
  * TODO This would be a good place for a debug log.
  */
 #[derive(Debug)]
-struct WfExecLiveState {
+struct SagaExecLiveState {
     workflow: Arc<SagaTemplate>,
     /** Overall execution state */
-    exec_state: WfState,
+    exec_state: SagaState,
 
     /** Queue of nodes that have not started but whose deps are satisfied */
     queue_todo: Vec<NodeIndex>,
@@ -1141,7 +1163,7 @@ struct WfExecLiveState {
     // TODO may as well store errors too
     node_outputs: BTreeMap<NodeIndex, Arc<JsonValue>>,
     /** Set of undone nodes. */
-    nodes_undone: BTreeMap<NodeIndex, WfUndoMode>,
+    nodes_undone: BTreeMap<NodeIndex, SagaUndoMode>,
 
     /** Child workflows created by a node (for status and control) */
     child_workflows: BTreeMap<NodeIndex, Vec<Arc<SagaExecutor>>>,
@@ -1154,40 +1176,42 @@ struct WfExecLiveState {
 }
 
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum WfNodeExecState {
+enum SagaNodeExecState {
     Blocked,
     QueuedToRun,
     TaskInProgress,
     Done,
     Failed,
     QueuedToUndo,
-    Undone(WfUndoMode),
+    Undone(SagaUndoMode),
 }
 
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-enum WfUndoMode {
+enum SagaUndoMode {
     ActionNeverRan,
     ActionUndone,
     ActionFailed,
 }
 
-impl fmt::Display for WfNodeExecState {
+impl fmt::Display for SagaNodeExecState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            WfNodeExecState::Blocked => "blocked",
-            WfNodeExecState::QueuedToRun => "queued-todo",
-            WfNodeExecState::TaskInProgress => "working",
-            WfNodeExecState::Done => "done",
-            WfNodeExecState::Failed => "failed",
-            WfNodeExecState::QueuedToUndo => "queued-undo",
-            WfNodeExecState::Undone(WfUndoMode::ActionNeverRan) => "abandoned",
-            WfNodeExecState::Undone(WfUndoMode::ActionUndone) => "undone",
-            WfNodeExecState::Undone(WfUndoMode::ActionFailed) => "failed",
+            SagaNodeExecState::Blocked => "blocked",
+            SagaNodeExecState::QueuedToRun => "queued-todo",
+            SagaNodeExecState::TaskInProgress => "working",
+            SagaNodeExecState::Done => "done",
+            SagaNodeExecState::Failed => "failed",
+            SagaNodeExecState::QueuedToUndo => "queued-undo",
+            SagaNodeExecState::Undone(SagaUndoMode::ActionNeverRan) => {
+                "abandoned"
+            }
+            SagaNodeExecState::Undone(SagaUndoMode::ActionUndone) => "undone",
+            SagaNodeExecState::Undone(SagaUndoMode::ActionFailed) => "failed",
         })
     }
 }
 
-impl WfExecLiveState {
+impl SagaExecLiveState {
     /*
      * TODO-design The current implementation does not use explicit state.  In
      * most cases, this made things better than before because each hunk of code
@@ -1198,32 +1222,32 @@ impl WfExecLiveState {
      * It's especially questionable to use load_status here -- or is that the
      * way we should go more generally?  See TODO-design in new_recover().
      */
-    fn node_exec_state(&self, node_id: &NodeIndex) -> WfNodeExecState {
+    fn node_exec_state(&self, node_id: &NodeIndex) -> SagaNodeExecState {
         /*
          * This seems like overkill but it seems helpful to validate state.
          */
-        let mut set: BTreeSet<WfNodeExecState> = BTreeSet::new();
+        let mut set: BTreeSet<SagaNodeExecState> = BTreeSet::new();
         let load_status =
             self.sglog.load_status_for_node(node_id.index() as u64);
         if let Some(undo_mode) = self.nodes_undone.get(node_id) {
-            set.insert(WfNodeExecState::Undone(*undo_mode));
+            set.insert(SagaNodeExecState::Undone(*undo_mode));
         } else if self.node_outputs.contains_key(node_id) {
-            set.insert(WfNodeExecState::Done);
+            set.insert(SagaNodeExecState::Done);
         } else if let WfNodeLoadStatus::Failed = load_status {
-            set.insert(WfNodeExecState::Failed);
+            set.insert(SagaNodeExecState::Failed);
         }
         if self.node_tasks.contains_key(node_id) {
-            set.insert(WfNodeExecState::TaskInProgress);
+            set.insert(SagaNodeExecState::TaskInProgress);
         }
         if self.queue_todo.contains(node_id) {
-            set.insert(WfNodeExecState::QueuedToRun);
+            set.insert(SagaNodeExecState::QueuedToRun);
         }
         if self.queue_undo.contains(node_id) {
-            set.insert(WfNodeExecState::QueuedToUndo);
+            set.insert(SagaNodeExecState::QueuedToUndo);
         }
         if set.is_empty() {
             if let WfNodeLoadStatus::NeverStarted = load_status {
-                WfNodeExecState::Blocked
+                SagaNodeExecState::Blocked
             } else {
                 panic!("could not determine node state");
             }
@@ -1238,10 +1262,10 @@ impl WfExecLiveState {
         assert!(self.queue_todo.is_empty());
         assert!(self.queue_undo.is_empty());
         assert!(
-            self.exec_state == WfState::Running
-                || self.exec_state == WfState::Unwinding
+            self.exec_state == SagaState::Running
+                || self.exec_state == SagaState::Unwinding
         );
-        self.exec_state = WfState::Done;
+        self.exec_state = SagaState::Done;
     }
 
     fn node_task(&mut self, node_id: NodeIndex, task: JoinHandle<()>) {
@@ -1264,14 +1288,14 @@ impl WfExecLiveState {
 /**
  * Summarizes the final state of a workflow execution.
  */
-pub struct WfExecResult {
+pub struct SagaExecResult {
     pub saga_id: SagaId,
     pub sglog: SagaLog,
     pub node_results: BTreeMap<String, WfActionResult>,
     succeeded: bool,
 }
 
-impl WfExecResult {
+impl SagaExecResult {
     pub fn lookup_output<T: WfActionOutput + 'static>(
         &self,
         name: &str,
@@ -1388,7 +1412,7 @@ pub struct SagaContext {
     ancestor_tree: Arc<BTreeMap<String, Arc<JsonValue>>>,
     node_id: NodeIndex,
     workflow: Arc<SagaTemplate>,
-    live_state: Arc<Mutex<WfExecLiveState>>,
+    live_state: Arc<Mutex<SagaExecLiveState>>,
     /* TODO-cleanup should not need a copy here */
     creator: String,
 }
