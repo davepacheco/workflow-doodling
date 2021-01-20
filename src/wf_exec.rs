@@ -1221,15 +1221,16 @@ impl WfExecLiveState {
         if self.queue_undo.contains(node_id) {
             set.insert(WfNodeExecState::QueuedToUndo);
         }
-        if let Some(the_state) = set.pop_first() {
-            assert!(set.is_empty());
-            the_state
-        } else {
+        if set.is_empty() {
             if let WfNodeLoadStatus::NeverStarted = load_status {
                 WfNodeExecState::Blocked
             } else {
                 panic!("could not determine node state");
             }
+        } else {
+            assert_eq!(set.len(), 1);
+            let the_state = set.into_iter().last().unwrap();
+            the_state
         }
     }
 

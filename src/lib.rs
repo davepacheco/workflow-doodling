@@ -1,11 +1,8 @@
 //! In-progress prototype implementation of workflows based on distributed sagas
 
 #![deny(elided_lifetimes_in_paths)]
-#![feature(map_first_last)]
 #![feature(option_expect_none)]
-#![feature(option_unwrap_none)]
 #![feature(or_patterns)]
-#![feature(type_name_of_val)]
 
 mod example_provision;
 mod wf_action;

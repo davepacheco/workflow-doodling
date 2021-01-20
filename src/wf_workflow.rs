@@ -222,7 +222,11 @@ impl WfBuilder {
         let last: Arc<dyn WfAction + 'static> = Arc::new(WfActionEndNode {});
         let label = format!("{:?}", last);
         let newnode = self.graph.add_node(label);
-        self.launchers.insert(newnode, last).unwrap_none();
+        /*
+         * It seems sketchy to have assertions with side effects.  We'd prefer
+         * `unwrap_none()`, but that's still experimental.
+         */
+        assert!(self.launchers.insert(newnode, last).is_none());
 
         for node in &self.last_added {
             self.graph.add_edge(*node, newnode, ());

@@ -4,6 +4,7 @@ use crate::wf_exec::WfContext;
 use anyhow::anyhow;
 use anyhow::Context;
 use async_trait::async_trait;
+use core::any::type_name;
 use core::fmt;
 use core::fmt::Debug;
 use core::future::Future;
@@ -336,6 +337,6 @@ where
          * The type name for a function includes its name, so it's a handy
          * summary for debugging.
          */
-        f.write_str(&std::any::type_name_of_val(&self.action_func))
+        f.write_str(&type_name::<ActionFuncType>())
     }
 }
