@@ -1,10 +1,10 @@
 //! Manages execution of a saga
 
-use crate::wf_action::WfAction;
-use crate::wf_action::WfActionInjectError;
-use crate::wf_action::WfActionOutput;
-use crate::wf_action::WfActionResult;
-use crate::wf_action::WfError;
+use crate::wf_action::SagaAction;
+use crate::wf_action::SagaActionInjectError;
+use crate::wf_action::SagaActionOutput;
+use crate::wf_action::SagaActionResult;
+use crate::wf_action::SagaError;
 use crate::wf_log::SagaNodeEventType;
 use crate::wf_log::SagaNodeLoadStatus;
 use crate::wf_workflow::SagaId;
@@ -42,7 +42,7 @@ use uuid::Uuid;
  * whole thing is a message passing exercise?
  */
 struct SgnsDone(Arc<JsonValue>);
-struct SgnsFailed(WfError);
+struct SgnsFailed(SagaError);
 struct SgnsUndone(SagaUndoMode);
 
 struct SagaNode<S: SagaNodeStateType> {
@@ -313,7 +313,7 @@ struct TaskParams {
     // TODO-cleanup there's no reason this should be an Arc.
     ancestor_tree: Arc<BTreeMap<String, Arc<JsonValue>>>,
     /** The action itself that we're executing. */
-    action: Arc<dyn WfAction>,
+    action: Arc<dyn SagaAction>,
 }
 
 /**
@@ -366,7 +366,7 @@ impl SagaExecutor {
         workflow: Arc<SagaTemplate>,
         sglog: SagaLog,
         creator: &str,
-    ) -> Result<SagaExecutor, WfError> {
+    ) -> Result<SagaExecutor, SagaError> {
         /*
          * During recovery, there's a fine line between operational errors and
          * programmer errors.  If we discover semantically invalid workflow
@@ -765,7 +765,7 @@ impl SagaExecutor {
             );
 
             let wfaction = if live_state.injected_errors.contains(&node_id) {
-                Arc::new(WfActionInjectError {}) as Arc<dyn WfAction>
+                Arc::new(SagaActionInjectError {}) as Arc<dyn SagaAction>
             } else {
                 Arc::clone(
                     live_state
@@ -1291,15 +1291,15 @@ impl SagaExecLiveState {
 pub struct SagaExecResult {
     pub saga_id: SagaId,
     pub sglog: SagaLog,
-    pub node_results: BTreeMap<String, WfActionResult>,
+    pub node_results: BTreeMap<String, SagaActionResult>,
     succeeded: bool,
 }
 
 impl SagaExecResult {
-    pub fn lookup_output<T: WfActionOutput + 'static>(
+    pub fn lookup_output<T: SagaActionOutput + 'static>(
         &self,
         name: &str,
-    ) -> Result<T, WfError> {
+    ) -> Result<T, SagaError> {
         if !self.succeeded {
             return Err(anyhow!(
                 "fetch output \"{}\" from workflow execution \
@@ -1432,7 +1432,7 @@ impl SagaContext {
      * the previous action stored.  We would enforce this at compile time if we
      * could.
      */
-    pub fn lookup<T: WfActionOutput + 'static>(&self, name: &str) -> T {
+    pub fn lookup<T: SagaActionOutput + 'static>(&self, name: &str) -> T {
         let item = self
             .ancestor_tree
             .get(name)
@@ -1455,10 +1455,7 @@ impl SagaContext {
      * constructed what the whole graph looks like, instead of only knowing
      * about child workflows once we start executing the node that creates them.
      */
-    pub async fn child_workflow(
-        &self,
-        wf: Arc<SagaTemplate>,
-    ) -> Arc<SagaExecutor> {
+    pub async fn child_saga(&self, wf: Arc<SagaTemplate>) -> Arc<SagaExecutor> {
         /*
          * TODO Really we want this to reach into the parent WfExecutor and make
          * a record about this new execution.  This is mostly for observability

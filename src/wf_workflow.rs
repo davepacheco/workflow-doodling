@@ -1,8 +1,8 @@
 //! Facilities for constructing saga graphs
 
-use crate::wf_action::WfAction;
-use crate::wf_action::WfActionEndNode;
-use crate::wf_action::WfActionStartNode;
+use crate::wf_action::SagaAction;
+use crate::wf_action::SagaActionEndNode;
+use crate::wf_action::SagaActionStartNode;
 use anyhow::anyhow;
 use petgraph::dot;
 use petgraph::graph::NodeIndex;
@@ -60,7 +60,7 @@ pub struct SagaTemplate {
     /** describes the nodes in the graph and their dependencies */
     pub(crate) graph: Graph<String, ()>,
     /** action associated with each node in the graph */
-    pub(crate) launchers: BTreeMap<NodeIndex, Arc<dyn WfAction>>,
+    pub(crate) launchers: BTreeMap<NodeIndex, Arc<dyn SagaAction>>,
     /** name associated with each node in the graph */
     pub(crate) node_names: BTreeMap<NodeIndex, String>,
     /** human-readable labels associated with each node in the graph */
@@ -109,7 +109,7 @@ pub struct SagaTemplateBuilder {
     /** DAG of saga nodes.  Weights for nodes are debug labels. */
     graph: Graph<String, ()>,
     /** For each node, the [`WfAction`] executed at that node. */
-    launchers: BTreeMap<NodeIndex, Arc<dyn WfAction>>,
+    launchers: BTreeMap<NodeIndex, Arc<dyn SagaAction>>,
     /**
      * For each node, the name of the node.  This is used for data stored by
      * that node.
@@ -129,7 +129,8 @@ impl SagaTemplateBuilder {
         let mut launchers = BTreeMap::new();
         let node_names = BTreeMap::new();
         let node_labels = BTreeMap::new();
-        let first: Arc<dyn WfAction + 'static> = Arc::new(WfActionStartNode {});
+        let first: Arc<dyn SagaAction + 'static> =
+            Arc::new(SagaActionStartNode {});
         let label = format!("{:?}", first);
         let root = graph.add_node(label);
         launchers.insert(root, first).expect_none("empty map had an element");
@@ -161,7 +162,7 @@ impl SagaTemplateBuilder {
         &mut self,
         name: &str,
         label: &str,
-        action: Arc<dyn WfAction>,
+        action: Arc<dyn SagaAction>,
     ) {
         let newnode = self.graph.add_node(label.to_string());
         self.launchers
@@ -191,7 +192,7 @@ impl SagaTemplateBuilder {
      */
     pub fn append_parallel(
         &mut self,
-        actions: Vec<(&str, &str, Arc<dyn WfAction>)>,
+        actions: Vec<(&str, &str, Arc<dyn SagaAction>)>,
     ) {
         let newnodes: Vec<NodeIndex> = actions
             .into_iter()
@@ -241,7 +242,8 @@ impl SagaTemplateBuilder {
          * Append an "end" node so that we can easily tell when the saga has
          * completed.
          */
-        let last: Arc<dyn WfAction + 'static> = Arc::new(WfActionEndNode {});
+        let last: Arc<dyn SagaAction + 'static> =
+            Arc::new(SagaActionEndNode {});
         let label = format!("{:?}", last);
         let newnode = self.graph.add_node(label);
         /*

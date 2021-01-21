@@ -1,7 +1,7 @@
 //! Persistent state for sagas
 
 use crate::wf_workflow::SagaId;
-use crate::WfError;
+use crate::SagaError;
 use anyhow::anyhow;
 use anyhow::Context;
 use chrono::DateTime;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 /* TODO-cleanup newtype for this? */
 type SagaNodeId = u64;
-type SagaLogResult = Result<(), WfError>;
+type SagaLogResult = Result<(), SagaError>;
 
 /**
  * Event types that may be found in the log for a particular action
@@ -88,7 +88,7 @@ impl SagaNodeLoadStatus {
     fn next_status(
         &self,
         event_type: &SagaNodeEventType,
-    ) -> Result<SagaNodeLoadStatus, WfError> {
+    ) -> Result<SagaNodeLoadStatus, SagaError> {
         match (self, event_type) {
             (SagaNodeLoadStatus::NeverStarted, SagaNodeEventType::Started) => {
                 Ok(SagaNodeLoadStatus::Started)
@@ -206,8 +206,7 @@ impl SagaLog {
          */
         async move { Ok(result) }
     }
-
-    fn record(&mut self, event: SagaNodeEvent) -> Result<(), WfError> {
+    fn record(&mut self, event: SagaNodeEvent) -> Result<(), SagaError> {
         let current_status = self.load_status_for_node(event.node_id);
         let next_status = current_status.next_status(&event.event_type)?;
 
