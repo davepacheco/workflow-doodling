@@ -29,12 +29,12 @@ pub type SagaUndoResult = Result<(), SagaError>;
 
 /**
  * Result of a function that implements a saga action
- *
+ */
+/*
  * This differs from [`SagaActionResult`] because [`SagaActionResult`] returns a
  * pretty generic type.  The function-oriented interface allows you to return
  * more specific types as long as they implement the [`SagaActionOutput`] trait.
- */
-/*
+ *
  * TODO-design There's no reason that SagaActionResult couldn't also look like
  * this.  We have this mechanism to allow `SagaActionFunc` functions to return
  * specific types while storing the generic thing inside the framework.  We do
@@ -167,7 +167,7 @@ impl SagaAction for SagaActionInjectError {
 }
 
 /**
- * Implementation for [`SagaAction`] using simple functions for the action and
+ * Implementation for `SagaAction` using simple functions for the action and
  * undo action
  */
 /*
