@@ -309,7 +309,7 @@ struct TaskParams {
     node_id: NodeIndex,
     /** channel over which to send completion message */
     done_tx: mpsc::Sender<TaskCompletion>,
-    /** Ancestor tree for this node.  See [`WfContext`]. */
+    /** Ancestor tree for this node.  See [`SagaContext`]. */
     // TODO-cleanup there's no reason this should be an Arc.
     ancestor_tree: Arc<BTreeMap<String, Arc<JsonValue>>>,
     /** The action itself that we're executing. */
@@ -319,7 +319,7 @@ struct TaskParams {
 /**
  * Executes a workflow
  *
- * Call `WfExecutor.run()` to get a Future.  You must `await` this Future to
+ * Call `SagaExecutor.run()` to get a Future.  You must `await` this Future to
  * actually execute the workflow.
  */
 /*
@@ -588,7 +588,7 @@ impl SagaExecutor {
      *
      * The ancestor tree for a node is a map whose keys are strings that
      * identify ancestor nodes in the graph and whose values represent the
-     * outputs from those nodes.  This is used by [`WfContext::lookup`].  See
+     * outputs from those nodes.  This is used by [`SagaContext::lookup`].  See
      * where we use this function in poll() for more details.
      */
     fn make_ancestor_tree(
@@ -639,8 +639,8 @@ impl SagaExecutor {
     }
 
     /**
-     * Wrapper for WfLog.record_now() that maps internal node indexes to stable
-     * node ids.
+     * Wrapper for SagaLog.record_now() that maps internal node indexes to
+     * stable node ids.
      */
     // TODO Consider how we do map internal node indexes to stable node ids.
     // TODO clean up this interface
@@ -664,9 +664,9 @@ impl SagaExecutor {
     async fn run_workflow(&self) {
         {
             /*
-             * TODO-design Every WfExec should be able to run_workflow() exactly
-             * once.  We don't really want to let you re-run it and get a new
-             * message on finish_tx.  However, we _do_ want to handle this
+             * TODO-design Every SagaExec should be able to run_workflow()
+             * exactly once.  We don't really want to let you re-run it and get
+             * a new message on finish_tx.  However, we _do_ want to handle this
              * particular case when we've recovered a "done" workflow and the
              * consumer has run() it (once).
              */
@@ -764,7 +764,7 @@ impl SagaExecutor {
                 false,
             );
 
-            let wfaction = if live_state.injected_errors.contains(&node_id) {
+            let sgaction = if live_state.injected_errors.contains(&node_id) {
                 Arc::new(SagaActionInjectError {}) as Arc<dyn SagaAction>
             } else {
                 Arc::clone(
@@ -782,7 +782,7 @@ impl SagaExecutor {
                 node_id,
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
-                action: wfaction,
+                action: sgaction,
                 creator: self.creator.clone(),
             };
 
@@ -812,7 +812,7 @@ impl SagaExecutor {
                 true,
             );
 
-            let wfaction = live_state
+            let sgaction = live_state
                 .workflow
                 .launchers
                 .get(&node_id)
@@ -824,7 +824,7 @@ impl SagaExecutor {
                 node_id,
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
-                action: Arc::clone(wfaction),
+                action: Arc::clone(sgaction),
                 creator: self.creator.clone(),
             };
 
@@ -1130,8 +1130,8 @@ impl SagaExecutor {
  * Encapsulates the (mutable) execution state of a workflow
  */
 /*
- * This is linked to a `WfExecutor` and protected by a Mutex.  The state is
- * mainly modified by [`WfExecutor::run_workflow`].  We may add methods for
+ * This is linked to a `SagaExecutor` and protected by a Mutex.  The state is
+ * mainly modified by [`SagaExecutor::run_workflow`].  We may add methods for
  * controlling the workflow (e.g., pausing), which would modify this as well.
  * We also intend to add methods for viewing workflow state, which will take the
  * lock to read state.
@@ -1444,26 +1444,20 @@ impl SagaContext {
     }
 
     /**
-     * Execute a new workflow `wf` and wait for it to complete.  `wf` is
-     * considered a "child" workflow of the current workflow.
+     * Execute a new dsaga `sg` and wait for it to complete.  `sg` is considered
+     * a "child" saga of the current saga.
      * TODO Is there some way to prevent people from instantiating their own
-     * WfExecutor by mistake instead?  Even better: if they do that, can we
+     * SagaExecutor by mistake instead?  Even better: if they do that, can we
      * detect that they're part of a workflow already somehow and make the new
      * one a child workflow?
-     * TODO Would this be better done by having a WfActionWorkflow that executed
-     * a workflow as an action?  This way we would know when the Workflow was
-     * constructed what the whole graph looks like, instead of only knowing
-     * about child workflows once we start executing the node that creates them.
+     * TODO Would this be better done by having a SagaActionWorkflow that
+     * executed a workflow as an action?  This way we would know when the
+     * Workflow was constructed what the whole graph looks like, instead of only
+     * knowing about child workflows once we start executing the node that
+     * creates them.
      */
-    pub async fn child_saga(&self, wf: Arc<SagaTemplate>) -> Arc<SagaExecutor> {
-        /*
-         * TODO Really we want this to reach into the parent WfExecutor and make
-         * a record about this new execution.  This is mostly for observability
-         * and control: if someone asks for the status of the parent workflow,
-         * we'd like to give details on this child workflow.  Similarly if they
-         * pause the parent, that should pause the child one.
-         */
-        let e = Arc::new(SagaExecutor::new(wf, &self.creator));
+    pub async fn child_saga(&self, sg: Arc<SagaTemplate>) -> Arc<SagaExecutor> {
+        let e = Arc::new(SagaExecutor::new(sg, &self.creator));
         /* TODO-correctness Prove the lock ordering is okay here .*/
         self.live_state
             .lock()

@@ -10,10 +10,10 @@ version.
 
 Subworkflows and recovery: this might "just work" if workflow actions that
 create subworkflows were idempotent.  But I don't think they are today.  Maybe
-if we first-class `WfActionWorkflow`, the framework can ensure that this is done
-idempotently.  Relatedly, if we add policies around whether each node has an
-"undo" action, for this type of node, we might need that policy to differ
-depending on the WfActionWorkflow (and not the Workflow behind it).
+if we first-class `SagaActionWorkflow`, the framework can ensure that this is
+done idempotently.  Relatedly, if we add policies around whether each node has
+an "undo" action, for this type of node, we might need that policy to differ
+depending on the SagaActionWorkflow (and not the Workflow behind it).
 
 Static typing in the construction and execution of the graph:
 

@@ -46,7 +46,7 @@ impl fmt::Display for SagaId {
  * Sagas help organize execution of a set of asynchronous tasks that can fail
  *
  * Each saga template is a directed acyclic graph (DAG) where each node
- * implements [`WfAction`].  With each node, there's typically an execution
+ * implements [`SagaAction`].  With each node, there's typically an execution
  * action and an undo action.  Execution guarantees that eventually all saga
  * nodes will complete successfully or else that any nodes whose actions may
  * have run have also had their undo action run.  This abstraction is based on
@@ -108,7 +108,7 @@ impl SagaTemplate {
 pub struct SagaTemplateBuilder {
     /** DAG of saga nodes.  Weights for nodes are debug labels. */
     graph: Graph<String, ()>,
-    /** For each node, the [`WfAction`] executed at that node. */
+    /** For each node, the [`SagaAction`] executed at that node. */
     launchers: BTreeMap<NodeIndex, Arc<dyn SagaAction>>,
     /**
      * For each node, the name of the node.  This is used for data stored by

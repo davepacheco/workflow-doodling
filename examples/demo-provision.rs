@@ -1,5 +1,5 @@
 /*!
- * Command-line tool for demo'ing workflow interfaces
+ * Command-line tool for demo'ing saga interfaces
  */
 
 use anyhow::Context;

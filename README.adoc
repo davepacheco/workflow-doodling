@@ -24,9 +24,9 @@ The hope is that with a strong foundation here, we can move quickly with future 
 
 Here's what exists so far:
 
-* an interface (`WfActionFunc`) for consumers to define their own "actions" using regular functions to implement the action and the undo action
-* an interface (`WfBuilder`) for building a workflow (DAG) from these actions
-* an execution engine (`WfExecutor`) that executes the action
+* an interface (`SagaActionFunc`) for consumers to define their own "actions" using regular functions to implement the action and the undo action
+* an interface (`SagaTemplateBuilder`) for building a workflow (DAG) from these actions
+* an execution engine (`SagaExecutor`) that executes the action
 * features:
 ** actions can share state using arbitrary serializable types (dynamically-checked, unfortunately)
 ** persistence and recovery: execution state is serialized to a log that can be recovered to resume execution after a crash
