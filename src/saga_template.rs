@@ -1,8 +1,8 @@
 //! Facilities for constructing saga graphs
 
-use crate::wf_action::SagaAction;
-use crate::wf_action::SagaActionEndNode;
-use crate::wf_action::SagaActionStartNode;
+use crate::saga_action::SagaAction;
+use crate::saga_action::SagaActionEndNode;
+use crate::saga_action::SagaActionStartNode;
 use anyhow::anyhow;
 use petgraph::dot;
 use petgraph::graph::NodeIndex;

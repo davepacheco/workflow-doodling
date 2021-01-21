@@ -1,6 +1,6 @@
 //! Persistent state for sagas
 
-use crate::wf_workflow::SagaId;
+use crate::saga_template::SagaId;
 use crate::SagaError;
 use anyhow::anyhow;
 use anyhow::Context;
