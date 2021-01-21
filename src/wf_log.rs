@@ -1,4 +1,4 @@
-//! Persistent state for workflows
+//! Persistent state for sagas
 
 use crate::wf_workflow::SagaId;
 use crate::WfError;
@@ -16,8 +16,9 @@ use std::io::Read;
 use std::io::Write;
 use std::sync::Arc;
 
-pub type WfNodeId = u64;
-pub type WfLogResult = Result<(), WfError>;
+/* TODO-cleanup newtype for this? */
+type SagaNodeId = u64;
+type SagaLogResult = Result<(), WfError>;
 
 /**
  * Event types that may be found in the log for a particular action
@@ -29,7 +30,7 @@ pub type WfLogResult = Result<(), WfError>;
  */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WfNodeEventType {
+pub enum SagaNodeEventType {
     /** The action has started running */
     Started,
     /** The action completed successfully (with output data) */
@@ -42,32 +43,32 @@ pub enum WfNodeEventType {
     UndoFinished,
 }
 
-impl fmt::Display for WfNodeEventType {
+impl fmt::Display for SagaNodeEventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            WfNodeEventType::Started => "started",
-            WfNodeEventType::Succeeded(_) => "succeeded",
-            WfNodeEventType::Failed => "failed",
-            WfNodeEventType::UndoStarted => "undo started",
-            WfNodeEventType::UndoFinished => "undo finished",
+            SagaNodeEventType::Started => "started",
+            SagaNodeEventType::Succeeded(_) => "succeeded",
+            SagaNodeEventType::Failed => "failed",
+            SagaNodeEventType::UndoStarted => "undo started",
+            SagaNodeEventType::UndoFinished => "undo finished",
         })
     }
 }
 
 /**
- * Persistent status for a workflow node
+ * Persistent status for a saga node
  *
  * The events present in the log determine the _persistent status_ of the node.
  * You can think of this like a single summary of the state of this action,
  * based solely on the persistent state.  When recovering from a crash, the
- * workflow executor uses this status to determine what to do next.  We also
- * maintain this for each WfLog to identify illegal transitions at runtime.
+ * saga executor uses this status to determine what to do next.  We also
+ * maintain this for each SagaLog to identify illegal transitions at runtime.
  *
  * A node's status is very nearly identified by the type of the last event seen.
  * It's cleaner to have a first-class summary here.
  */
 #[derive(Clone, Debug)]
-pub enum WfNodeLoadStatus {
+pub enum SagaNodeLoadStatus {
     /** The action never started running */
     NeverStarted,
     /** The action has started running */
@@ -82,33 +83,36 @@ pub enum WfNodeLoadStatus {
     UndoFinished,
 }
 
-impl WfNodeLoadStatus {
+impl SagaNodeLoadStatus {
     /** Returns the new status for a node after recording the given event. */
     fn next_status(
         &self,
-        event_type: &WfNodeEventType,
-    ) -> Result<WfNodeLoadStatus, WfError> {
+        event_type: &SagaNodeEventType,
+    ) -> Result<SagaNodeLoadStatus, WfError> {
         match (self, event_type) {
-            (WfNodeLoadStatus::NeverStarted, WfNodeEventType::Started) => {
-                Ok(WfNodeLoadStatus::Started)
+            (SagaNodeLoadStatus::NeverStarted, SagaNodeEventType::Started) => {
+                Ok(SagaNodeLoadStatus::Started)
             }
-            (WfNodeLoadStatus::Started, WfNodeEventType::Succeeded(out)) => {
-                Ok(WfNodeLoadStatus::Succeeded(Arc::clone(out)))
+            (
+                SagaNodeLoadStatus::Started,
+                SagaNodeEventType::Succeeded(out),
+            ) => Ok(SagaNodeLoadStatus::Succeeded(Arc::clone(out))),
+            (SagaNodeLoadStatus::Started, SagaNodeEventType::Failed) => {
+                Ok(SagaNodeLoadStatus::Failed)
             }
-            (WfNodeLoadStatus::Started, WfNodeEventType::Failed) => {
-                Ok(WfNodeLoadStatus::Failed)
+            (
+                SagaNodeLoadStatus::Succeeded(_),
+                SagaNodeEventType::UndoStarted,
+            ) => Ok(SagaNodeLoadStatus::UndoStarted),
+            (SagaNodeLoadStatus::Failed, SagaNodeEventType::UndoStarted) => {
+                Ok(SagaNodeLoadStatus::UndoStarted)
             }
-            (WfNodeLoadStatus::Succeeded(_), WfNodeEventType::UndoStarted) => {
-                Ok(WfNodeLoadStatus::UndoStarted)
-            }
-            (WfNodeLoadStatus::Failed, WfNodeEventType::UndoStarted) => {
-                Ok(WfNodeLoadStatus::UndoStarted)
-            }
-            (WfNodeLoadStatus::UndoStarted, WfNodeEventType::UndoFinished) => {
-                Ok(WfNodeLoadStatus::UndoFinished)
-            }
+            (
+                SagaNodeLoadStatus::UndoStarted,
+                SagaNodeEventType::UndoFinished,
+            ) => Ok(SagaNodeLoadStatus::UndoFinished),
             _ => Err(anyhow!(
-                "workflow node with status \"{:?}\": event \"{}\" is illegal",
+                "saga node with status \"{:?}\": event \"{}\" is illegal",
                 self,
                 event_type
             )),
@@ -117,16 +121,16 @@ impl WfNodeLoadStatus {
 }
 
 /**
- * An entry in the workflow log
+ * An entry in the saga log
  */
 #[derive(Clone, Deserialize, Serialize)]
-pub struct WfNodeEvent {
+pub struct SagaNodeEvent {
     /** id of the saga */
     saga_id: SagaId,
-    /** id of the workflow node */
-    node_id: WfNodeId,
+    /** id of the saga node */
+    node_id: SagaNodeId,
     /** what's indicated by this event */
-    event_type: WfNodeEventType,
+    event_type: SagaNodeEventType,
 
     /* The following debugging fields are not used in the code. */
     /** when this event was recorded (for debugging) */
@@ -135,7 +139,7 @@ pub struct WfNodeEvent {
     creator: String,
 }
 
-impl fmt::Debug for WfNodeEvent {
+impl fmt::Debug for SagaNodeEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -149,13 +153,13 @@ impl fmt::Debug for WfNodeEvent {
 }
 
 /**
- * Write to a workflow's log
+ * Write to a saga's log
  */
 /*
  * TODO-cleanup This structure is used both for writing to the log and
  * recovering the log.  There are some similarities.  However, it might be
  * useful to enforce that you're only doing one of these at a time by having
- * these by separate types, with the recovery one converting into WfLog when
+ * these by separate types, with the recovery one converting into SagaLog when
  * you're done with recovery.
  */
 #[derive(Clone)]
@@ -164,8 +168,8 @@ pub struct SagaLog {
     pub saga_id: SagaId,
     pub unwinding: bool,
     creator: String,
-    events: Vec<WfNodeEvent>,
-    node_status: BTreeMap<WfNodeId, WfNodeLoadStatus>,
+    events: Vec<SagaNodeEvent>,
+    node_status: BTreeMap<SagaNodeId, SagaNodeLoadStatus>,
 }
 
 impl SagaLog {
@@ -181,10 +185,10 @@ impl SagaLog {
 
     pub fn record_now(
         &mut self,
-        node_id: WfNodeId,
-        event_type: WfNodeEventType,
-    ) -> impl core::future::Future<Output = WfLogResult> {
-        let event = WfNodeEvent {
+        node_id: SagaNodeId,
+        event_type: SagaNodeEventType,
+    ) -> impl core::future::Future<Output = SagaLogResult> {
+        let event = SagaNodeEvent {
             saga_id: self.saga_id,
             node_id,
             event_time: Utc::now(),
@@ -203,14 +207,14 @@ impl SagaLog {
         async move { Ok(result) }
     }
 
-    fn record(&mut self, event: WfNodeEvent) -> Result<(), WfError> {
+    fn record(&mut self, event: SagaNodeEvent) -> Result<(), WfError> {
         let current_status = self.load_status_for_node(event.node_id);
         let next_status = current_status.next_status(&event.event_type)?;
 
         match next_status {
-            WfNodeLoadStatus::Failed
-            | WfNodeLoadStatus::UndoStarted
-            | WfNodeLoadStatus::UndoFinished => {
+            SagaNodeLoadStatus::Failed
+            | SagaNodeLoadStatus::UndoStarted
+            | SagaNodeLoadStatus::UndoFinished => {
                 self.unwinding = true;
             }
             _ => (),
@@ -222,44 +226,47 @@ impl SagaLog {
         Ok(())
     }
 
-    pub fn load_status_for_node(&self, node_id: WfNodeId) -> &WfNodeLoadStatus {
+    pub fn load_status_for_node(
+        &self,
+        node_id: SagaNodeId,
+    ) -> &SagaNodeLoadStatus {
         self.node_status
             .get(&node_id)
-            .unwrap_or(&WfNodeLoadStatus::NeverStarted)
+            .unwrap_or(&SagaNodeLoadStatus::NeverStarted)
     }
 
-    pub fn events(&self) -> &Vec<WfNodeEvent> {
+    pub fn events(&self) -> &Vec<SagaNodeEvent> {
         &self.events
     }
 
     // TODO-blocking
     pub fn dump<W: Write>(&self, writer: W) -> Result<(), anyhow::Error> {
         /* TODO-cleanup can we avoid these clones? */
-        let s = WfLogSerialized {
+        let s = SagaLogSerialized {
             saga_id: self.saga_id,
             creator: self.creator.clone(),
             events: self.events.clone(),
         };
 
         serde_json::to_writer_pretty(writer, &s).with_context(|| {
-            format!("serializing log for workflow {}", self.saga_id)
+            format!("serializing log for saga {}", self.saga_id)
         })
     }
 
     // TODO-blocking
     // TODO-design There's some confusion about the recovery process in general
     // and the "creator" field.  The recorded log has a creator, and each entry
-    // has a creator.  The executor also has a creator, and the WfLog has a
-    // creator.  These can nearly all be different, but the executor and WfLog
-    // creator should match.  Part of the problem here is that the WfLog only
+    // has a creator.  The executor also has a creator, and the SagaLog has a
+    // creator.  These can nearly all be different, but the executor and SagaLog
+    // creator should match.  Part of the problem here is that the SagaLog only
     // has one "creator", but we really want it to have two: the one in the
     // recorded log, and the one that's used for new entries.
     pub fn load<R: Read>(
         creator: &str,
         reader: R,
     ) -> Result<SagaLog, anyhow::Error> {
-        let mut s: WfLogSerialized = serde_json::from_reader(reader)
-            .with_context(|| "deserializing workflow log")?;
+        let mut s: SagaLogSerialized = serde_json::from_reader(reader)
+            .with_context(|| "deserializing saga log")?;
         let mut sglog = SagaLog::new(&creator, s.saga_id);
 
         /*
@@ -279,51 +286,51 @@ impl SagaLog {
             /*
              * TODO-cleanup Is there a better way to do this?  We want to sort
              * by the event type, where event types are compared by the order
-             * they're defined in WfEventType.  We could almost use derived
-             * PartialOrd and PartialEq implementations for WfEventType, except
+             * they're defined in SagaEventType.  We could almost use derived
+             * PartialOrd and PartialEq implementations for SagaEventType, except
              * that one variant has a payload that does _not_ necessarily
              * implement PartialEq or PartialOrd.  It seems like that means we
              * have to implement this by hand.
              */
-            WfNodeEventType::Started => 1,
-            WfNodeEventType::Succeeded(_) => 2,
-            WfNodeEventType::Failed => 3,
-            WfNodeEventType::UndoStarted => 4,
-            WfNodeEventType::UndoFinished => 5,
+            SagaNodeEventType::Started => 1,
+            SagaNodeEventType::Succeeded(_) => 2,
+            SagaNodeEventType::Failed => 3,
+            SagaNodeEventType::UndoStarted => 4,
+            SagaNodeEventType::UndoFinished => 5,
         });
 
         /*
-         * Replay the events for this workflow.
+         * Replay the events for this saga.
          */
         for event in s.events {
             if event.saga_id != sglog.saga_id {
                 return Err(anyhow!(
                     "found an event in the log for a \
-                    different workflow ({}) than the log's header ({})",
+                    different saga ({}) than the log's header ({})",
                     event.saga_id,
                     sglog.saga_id
                 ));
             }
 
-            sglog.record(event).with_context(|| "recovering workflow log")?;
+            sglog.record(event).with_context(|| "recovering saga log")?;
         }
         Ok(sglog)
     }
 }
 
 #[derive(Deserialize, Serialize)]
-struct WfLogSerialized {
+struct SagaLogSerialized {
     /* TODO-robustness add version */
     saga_id: SagaId,
     creator: String,
-    events: Vec<WfNodeEvent>,
+    events: Vec<SagaNodeEvent>,
 }
 
 impl fmt::Debug for SagaLog {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "WORKFLOW LOG:\n")?;
-        write!(f, "workflow execution id: {}\n", self.saga_id)?;
-        write!(f, "creator:               {}\n", self.creator)?;
+        write!(f, "SAGA LOG:\n")?;
+        write!(f, "saga execution id: {}\n", self.saga_id)?;
+        write!(f, "creator:           {}\n", self.creator)?;
         write!(
             f,
             "direction:             {}\n",

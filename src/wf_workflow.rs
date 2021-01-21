@@ -155,7 +155,7 @@ impl SagaTemplateBuilder {
      *
      * The node is called `name`.  This name is used for storing the output of
      * the action so that descendant nodes can access it using
-     * [`WfContext::lookup`].
+     * [`SagaContext::lookup`].
      */
     pub fn append(
         &mut self,
@@ -187,7 +187,7 @@ impl SagaTemplateBuilder {
      * The new nodes will individually depend on completion of all actions that
      * were added in the last call to `append` or `append_parallel`.  `actions`
      * is a vector of `(name, action)` tuples analogous to the arguments to
-     * [`WfBuilder::append`].
+     * [`SagaTemplateBuilder::append`].
      */
     pub fn append_parallel(
         &mut self,

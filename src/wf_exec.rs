@@ -5,8 +5,8 @@ use crate::wf_action::WfActionInjectError;
 use crate::wf_action::WfActionOutput;
 use crate::wf_action::WfActionResult;
 use crate::wf_action::WfError;
-use crate::wf_log::WfNodeEventType;
-use crate::wf_log::WfNodeLoadStatus;
+use crate::wf_log::SagaNodeEventType;
+use crate::wf_log::SagaNodeLoadStatus;
 use crate::wf_workflow::SagaId;
 use crate::SagaLog;
 use crate::SagaTemplate;
@@ -62,12 +62,12 @@ trait SagaNodeRest: Send + Sync {
         exec: &SagaExecutor,
         live_state: &mut SagaExecLiveState,
     );
-    fn log_event(&self) -> WfNodeEventType;
+    fn log_event(&self) -> SagaNodeEventType;
 }
 
 impl SagaNodeRest for SagaNode<SgnsDone> {
-    fn log_event(&self) -> WfNodeEventType {
-        WfNodeEventType::Succeeded(Arc::clone(&self.state.0))
+    fn log_event(&self) -> SagaNodeEventType {
+        SagaNodeEventType::Succeeded(Arc::clone(&self.state.0))
     }
 
     fn propagate(
@@ -121,8 +121,8 @@ impl SagaNodeRest for SagaNode<SgnsDone> {
 }
 
 impl SagaNodeRest for SagaNode<SgnsFailed> {
-    fn log_event(&self) -> WfNodeEventType {
-        WfNodeEventType::Failed
+    fn log_event(&self) -> SagaNodeEventType {
+        SagaNodeEventType::Failed
     }
 
     fn propagate(
@@ -169,8 +169,8 @@ impl SagaNodeRest for SagaNode<SgnsFailed> {
 }
 
 impl SagaNodeRest for SagaNode<SgnsUndone> {
-    fn log_event(&self) -> WfNodeEventType {
-        WfNodeEventType::UndoFinished
+    fn log_event(&self) -> SagaNodeEventType {
+        SagaNodeEventType::UndoFinished
     }
 
     fn propagate(
@@ -461,7 +461,7 @@ impl SagaExecutor {
             };
 
             match node_status {
-                WfNodeLoadStatus::NeverStarted => {
+                SagaNodeLoadStatus::NeverStarted => {
                     match direction {
                         RecoveryDirection::Forward(true) => {
                             /*
@@ -500,14 +500,14 @@ impl SagaExecutor {
                         _ => (),
                     }
                 }
-                WfNodeLoadStatus::Started => {
+                SagaNodeLoadStatus::Started => {
                     /*
                      * Whether we're unwinding or not, we have to finish
                      * execution of this action.
                      */
                     live_state.queue_todo.push(node_id);
                 }
-                WfNodeLoadStatus::Succeeded(output) => {
+                SagaNodeLoadStatus::Succeeded(output) => {
                     /*
                      * If the node has finished executing and not started
                      * undoing, and if we're unwinding and the children have
@@ -522,7 +522,7 @@ impl SagaExecutor {
                         live_state.queue_undo.push(node_id);
                     }
                 }
-                WfNodeLoadStatus::Failed => {
+                SagaNodeLoadStatus::Failed => {
                     /*
                      * If the node failed, and we're unwinding, and the children
                      * have all been undone, it's time to undo this one.
@@ -535,7 +535,7 @@ impl SagaExecutor {
                             .insert(node_id, SagaUndoMode::ActionFailed);
                     }
                 }
-                WfNodeLoadStatus::UndoStarted => {
+                SagaNodeLoadStatus::UndoStarted => {
                     /*
                      * We know we're unwinding. (Otherwise, we should have
                      * failed validation earlier.)  Execute the undo action.
@@ -543,7 +543,7 @@ impl SagaExecutor {
                     assert!(!forward);
                     live_state.queue_undo.push(node_id);
                 }
-                WfNodeLoadStatus::UndoFinished => {
+                SagaNodeLoadStatus::UndoFinished => {
                     /*
                      * Again, we know we're unwinding.  We've also finished
                      * undoing this node.
@@ -649,7 +649,7 @@ impl SagaExecutor {
     async fn record_now(
         sglog: &mut SagaLog,
         node: NodeIndex,
-        event_type: WfNodeEventType,
+        event_type: SagaNodeEventType,
     ) {
         let node_id = node.index() as u64;
         sglog.record_now(node_id, event_type).await.unwrap();
@@ -851,19 +851,19 @@ impl SagaExecutor {
             let load_status =
                 live_state.sglog.load_status_for_node(node_id.index() as u64);
             match load_status {
-                WfNodeLoadStatus::NeverStarted => {
+                SagaNodeLoadStatus::NeverStarted => {
                     SagaExecutor::record_now(
                         &mut live_state.sglog,
                         node_id,
-                        WfNodeEventType::Started,
+                        SagaNodeEventType::Started,
                     )
                     .await;
                 }
-                WfNodeLoadStatus::Started => (),
-                WfNodeLoadStatus::Succeeded(_)
-                | WfNodeLoadStatus::Failed
-                | WfNodeLoadStatus::UndoStarted
-                | WfNodeLoadStatus::UndoFinished => {
+                SagaNodeLoadStatus::Started => (),
+                SagaNodeLoadStatus::Succeeded(_)
+                | SagaNodeLoadStatus::Failed
+                | SagaNodeLoadStatus::UndoStarted
+                | SagaNodeLoadStatus::UndoFinished => {
                     panic!("starting node in bad state")
                 }
             }
@@ -905,19 +905,19 @@ impl SagaExecutor {
             let load_status =
                 live_state.sglog.load_status_for_node(node_id.index() as u64);
             match load_status {
-                WfNodeLoadStatus::Succeeded(_) => {
+                SagaNodeLoadStatus::Succeeded(_) => {
                     SagaExecutor::record_now(
                         &mut live_state.sglog,
                         node_id,
-                        WfNodeEventType::UndoStarted,
+                        SagaNodeEventType::UndoStarted,
                     )
                     .await;
                 }
-                WfNodeLoadStatus::UndoStarted => (),
-                WfNodeLoadStatus::NeverStarted
-                | WfNodeLoadStatus::Started
-                | WfNodeLoadStatus::Failed
-                | WfNodeLoadStatus::UndoFinished => {
+                SagaNodeLoadStatus::UndoStarted => (),
+                SagaNodeLoadStatus::NeverStarted
+                | SagaNodeLoadStatus::Started
+                | SagaNodeLoadStatus::Failed
+                | SagaNodeLoadStatus::UndoFinished => {
                     panic!("undoing node in bad state")
                 }
             }
@@ -1233,7 +1233,7 @@ impl SagaExecLiveState {
             set.insert(SagaNodeExecState::Undone(*undo_mode));
         } else if self.node_outputs.contains_key(node_id) {
             set.insert(SagaNodeExecState::Done);
-        } else if let WfNodeLoadStatus::Failed = load_status {
+        } else if let SagaNodeLoadStatus::Failed = load_status {
             set.insert(SagaNodeExecState::Failed);
         }
         if self.node_tasks.contains_key(node_id) {
@@ -1246,7 +1246,7 @@ impl SagaExecLiveState {
             set.insert(SagaNodeExecState::QueuedToUndo);
         }
         if set.is_empty() {
-            if let WfNodeLoadStatus::NeverStarted = load_status {
+            if let SagaNodeLoadStatus::NeverStarted = load_status {
                 SagaNodeExecState::Blocked
             } else {
                 panic!("could not determine node state");
@@ -1351,8 +1351,8 @@ where
  * node's load status.
  */
 fn recovery_validate_parent(
-    parent_status: &WfNodeLoadStatus,
-    child_status: &WfNodeLoadStatus,
+    parent_status: &SagaNodeLoadStatus,
+    child_status: &SagaNodeLoadStatus,
 ) -> bool {
     match (child_status, parent_status) {
         /*
@@ -1369,11 +1369,11 @@ fn recovery_validate_parent(
          * associated with a parent that failed.)
          */
         (
-            WfNodeLoadStatus::Started
-            | WfNodeLoadStatus::Succeeded(_)
-            | WfNodeLoadStatus::Failed
-            | WfNodeLoadStatus::UndoStarted,
-            WfNodeLoadStatus::Succeeded(_),
+            SagaNodeLoadStatus::Started
+            | SagaNodeLoadStatus::Succeeded(_)
+            | SagaNodeLoadStatus::Failed
+            | SagaNodeLoadStatus::UndoStarted,
+            SagaNodeLoadStatus::Succeeded(_),
         ) => true,
 
         /*
@@ -1381,10 +1381,10 @@ fn recovery_validate_parent(
          * either "done" or one of the undoing states.
          */
         (
-            WfNodeLoadStatus::UndoFinished,
-            WfNodeLoadStatus::Succeeded(_)
-            | WfNodeLoadStatus::UndoStarted
-            | WfNodeLoadStatus::UndoFinished,
+            SagaNodeLoadStatus::UndoFinished,
+            SagaNodeLoadStatus::Succeeded(_)
+            | SagaNodeLoadStatus::UndoStarted
+            | SagaNodeLoadStatus::UndoFinished,
         ) => true,
 
         /*
@@ -1392,11 +1392,11 @@ fn recovery_validate_parent(
          * those associated with undoing, since the child must be undone first.
          */
         (
-            WfNodeLoadStatus::NeverStarted,
-            WfNodeLoadStatus::NeverStarted
-            | WfNodeLoadStatus::Started
-            | WfNodeLoadStatus::Succeeded(_)
-            | WfNodeLoadStatus::Failed,
+            SagaNodeLoadStatus::NeverStarted,
+            SagaNodeLoadStatus::NeverStarted
+            | SagaNodeLoadStatus::Started
+            | SagaNodeLoadStatus::Succeeded(_)
+            | SagaNodeLoadStatus::Failed,
         ) => true,
         _ => false,
     }
