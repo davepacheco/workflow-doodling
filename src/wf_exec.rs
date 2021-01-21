@@ -75,25 +75,25 @@ impl SagaNodeRest for SagaNode<SgnsDone> {
         exec: &SagaExecutor,
         live_state: &mut SagaExecLiveState,
     ) {
-        let graph = &exec.workflow.graph;
+        let graph = &exec.saga_template.graph;
         live_state
             .node_outputs
             .insert(self.node_id, Arc::clone(&self.state.0))
             .expect_none("node finished twice (storing output)");
 
-        if self.node_id == exec.workflow.end_node {
+        if self.node_id == exec.saga_template.end_node {
             /*
-             * If we've completed the last node, the workflow is done.
+             * If we've completed the last node, the saga is done.
              */
             assert_eq!(live_state.exec_state, SagaState::Running);
             assert_eq!(graph.node_count(), live_state.node_outputs.len());
-            live_state.mark_workflow_done();
+            live_state.mark_saga_done();
             return;
         }
 
         if live_state.exec_state == SagaState::Unwinding {
             /*
-             * If the workflow is currently unwinding, then this node finishing
+             * If the saga is currently unwinding, then this node finishing
              * doesn't unblock any other nodes.  However, it potentially
              * unblocks undoing itself.  We'll only proceed if all of our child
              * nodes are "undone" already.
@@ -130,7 +130,7 @@ impl SagaNodeRest for SagaNode<SgnsFailed> {
         exec: &SagaExecutor,
         live_state: &mut SagaExecLiveState,
     ) {
-        let graph = &exec.workflow.graph;
+        let graph = &exec.saga_template.graph;
 
         if live_state.exec_state == SagaState::Unwinding {
             /*
@@ -158,9 +158,9 @@ impl SagaNodeRest for SagaNode<SgnsFailed> {
              * it trivially "undone" and propagate that.
              */
             live_state.exec_state = SagaState::Unwinding;
-            assert_ne!(self.node_id, exec.workflow.end_node);
+            assert_ne!(self.node_id, exec.saga_template.end_node);
             let new_node = SagaNode {
-                node_id: exec.workflow.end_node,
+                node_id: exec.saga_template.end_node,
                 state: SgnsUndone(SagaUndoMode::ActionNeverRan),
             };
             new_node.propagate(exec, live_state);
@@ -178,18 +178,18 @@ impl SagaNodeRest for SagaNode<SgnsUndone> {
         exec: &SagaExecutor,
         live_state: &mut SagaExecLiveState,
     ) {
-        let graph = &exec.workflow.graph;
+        let graph = &exec.saga_template.graph;
         assert_eq!(live_state.exec_state, SagaState::Unwinding);
         live_state
             .nodes_undone
             .insert(self.node_id, self.state.0)
             .expect_none("node already undone");
 
-        if self.node_id == exec.workflow.start_node {
+        if self.node_id == exec.saga_template.start_node {
             /*
-             * If we've undone the start node, the workflow is done.
+             * If we've undone the start node, the saga is done.
              */
-            live_state.mark_workflow_done();
+            live_state.mark_saga_done();
             return;
         }
 
@@ -265,7 +265,7 @@ impl SagaNodeRest for SagaNode<SgnsUndone> {
 }
 
 /**
- * Execution state for the workflow overall
+ * Execution state for the saga overall
  */
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum SagaState {
@@ -291,11 +291,11 @@ struct TaskCompletion {
  * Context provided to the (tokio) task that executes an action
  */
 struct TaskParams {
-    /** Handle to the workflow itself, used for metadata like the label */
-    workflow: Arc<SagaTemplate>,
+    /** Handle to the saga itself, used for metadata like the label */
+    saga_template: Arc<SagaTemplate>,
 
     /**
-     * Handle to the workflow's live state
+     * Handle to the saga's live state
      *
      * This is used only to update state for status purposes.  We want to avoid
      * any tight coupling between this task and the internal state.
@@ -317,10 +317,10 @@ struct TaskParams {
 }
 
 /**
- * Executes a workflow
+ * Executes a saga
  *
  * Call `SagaExecutor.run()` to get a Future.  You must `await` this Future to
- * actually execute the workflow.
+ * actually execute the saga.
  */
 /*
  * TODO Lots more could be said here, but the basic idea matches distributed
@@ -331,7 +331,7 @@ struct TaskParams {
 #[derive(Debug)]
 pub struct SagaExecutor {
     // TODO This could probably be a reference instead.
-    workflow: Arc<SagaTemplate>,
+    saga_template: Arc<SagaTemplate>,
 
     creator: String,
 
@@ -351,7 +351,7 @@ enum RecoveryDirection {
 }
 
 impl SagaExecutor {
-    /** Create an executor to run the given workflow. */
+    /** Create an executor to run the given saga. */
     pub fn new(w: Arc<SagaTemplate>, creator: &str) -> SagaExecutor {
         let saga_id = SagaId(Uuid::new_v4());
         let sglog = SagaLog::new(creator, saga_id);
@@ -359,28 +359,28 @@ impl SagaExecutor {
     }
 
     /**
-     * Create an executor to run the given workflow that may have already
+     * Create an executor to run the given saga that may have already
      * started, using the given log events.
      */
     pub fn new_recover(
-        workflow: Arc<SagaTemplate>,
+        saga_template: Arc<SagaTemplate>,
         sglog: SagaLog,
         creator: &str,
     ) -> Result<SagaExecutor, SagaError> {
         /*
          * During recovery, there's a fine line between operational errors and
-         * programmer errors.  If we discover semantically invalid workflow
-         * state, that's an operational error that we must handle gracefully.
-         * We use lots of assertions to check invariants about our own process
-         * for loading the state.  We panic if those are violated.  For example,
-         * if we find that we've loaded the same node twice, that's a bug in
-         * this code right here (which walks each node of the graph exactly
-         * once), not a result of corrupted database state.
+         * programmer errors.  If we discover semantically invalid saga state,
+         * that's an operational error that we must handle gracefully.  We use
+         * lots of assertions to check invariants about our own process for
+         * loading the state.  We panic if those are violated.  For example, if
+         * we find that we've loaded the same node twice, that's a bug in this
+         * code right here (which walks each node of the graph exactly once),
+         * not a result of corrupted database state.
          */
         let saga_id = sglog.saga_id;
         let forward = !sglog.unwinding;
         let mut live_state = SagaExecLiveState {
-            workflow: Arc::clone(&workflow),
+            saga_template: Arc::clone(&saga_template),
             exec_state: if forward {
                 SagaState::Running
             } else {
@@ -391,7 +391,7 @@ impl SagaExecutor {
             node_tasks: BTreeMap::new(),
             node_outputs: BTreeMap::new(),
             nodes_undone: BTreeMap::new(),
-            child_workflows: BTreeMap::new(),
+            child_sagas: BTreeMap::new(),
             sglog: sglog,
             injected_errors: BTreeSet::new(),
         };
@@ -402,8 +402,8 @@ impl SagaExecutor {
          * a standard topological sort.  For unwinding, reverse that.
          */
         let graph_nodes = {
-            let mut nodes = toposort(&workflow.graph, None)
-                .expect("workflow DAG had cycles");
+            let mut nodes = toposort(&saga_template.graph, None)
+                .expect("saga DAG had cycles");
             if !forward {
                 nodes.reverse();
             }
@@ -420,7 +420,9 @@ impl SagaExecutor {
              * induction, this validates everything in the graph from the start
              * or end node to the current node.
              */
-            for parent in workflow.graph.neighbors_directed(node_id, Incoming) {
+            for parent in
+                saga_template.graph.neighbors_directed(node_id, Incoming)
+            {
                 let parent_status = live_state
                     .sglog
                     .load_status_for_node(parent.index() as u64);
@@ -437,7 +439,7 @@ impl SagaExecutor {
                 }
             }
 
-            let graph = &workflow.graph;
+            let graph = &saga_template.graph;
             let direction = if forward {
                 RecoveryDirection::Forward(neighbors_all(
                     graph,
@@ -480,7 +482,7 @@ impl SagaExecutor {
                              * TODO-design Does this suggest a better way to do
                              * this might be to simply load all the state that
                              * we have into the SagaExecLiveState and execute
-                             * the workflow as normal, but have normal execution
+                             * the saga as normal, but have normal execution
                              * check for cached values instead of running
                              * actions?  In a sense, this makes the recovery
                              * path look like the normal path rather than having
@@ -491,7 +493,7 @@ impl SagaExecutor {
                              * have fewer code paths, in a real sense.  It moves
                              * those code paths to normal execution, but they're
                              * still bifurcated from the case where we didn't
-                             * recover the workflow.
+                             * recover the saga.
                              */
                             live_state
                                 .nodes_undone
@@ -565,16 +567,16 @@ impl SagaExecutor {
         /*
          * Check our done conditions.
          */
-        if live_state.node_outputs.contains_key(&workflow.end_node)
-            || live_state.nodes_undone.contains_key(&workflow.start_node)
+        if live_state.node_outputs.contains_key(&saga_template.end_node)
+            || live_state.nodes_undone.contains_key(&saga_template.start_node)
         {
-            live_state.mark_workflow_done();
+            live_state.mark_saga_done();
         }
 
         let (finish_tx, _) = broadcast::channel(1);
 
         Ok(SagaExecutor {
-            workflow,
+            saga_template: saga_template,
             creator: creator.to_owned(),
             saga_id,
             finish_tx,
@@ -603,7 +605,8 @@ impl SagaExecutor {
             return;
         }
 
-        let ancestors = self.workflow.graph.neighbors_directed(node, Incoming);
+        let ancestors =
+            self.saga_template.graph.neighbors_directed(node, Incoming);
         for ancestor in ancestors {
             self.make_ancestor_tree_node(tree, live_state, ancestor);
         }
@@ -615,7 +618,7 @@ impl SagaExecutor {
         live_state: &SagaExecLiveState,
         node: NodeIndex,
     ) {
-        if node == self.workflow.start_node {
+        if node == self.saga_template.start_node {
             return;
         }
 
@@ -627,7 +630,7 @@ impl SagaExecutor {
          * on to one of the undoing states, then that implies we've already
          * finished undoing descendants, which would include the current node.
          */
-        let name = self.workflow.node_names[&node].to_string();
+        let name = self.saga_template.node_names[&node].to_string();
         let output = live_state.node_output(node);
         tree.insert(name, output);
         self.make_ancestor_tree(tree, live_state, node, false);
@@ -656,18 +659,18 @@ impl SagaExecutor {
     }
 
     /**
-     * Runs the workflow
+     * Runs the saga
      *
-     * This might be running a workflow that has never been started before or
+     * This might be running a saga that has never been started before or
      * one that has been recovered from persistent state.
      */
-    async fn run_workflow(&self) {
+    async fn run_saga(&self) {
         {
             /*
-             * TODO-design Every SagaExec should be able to run_workflow()
-             * exactly once.  We don't really want to let you re-run it and get
-             * a new message on finish_tx.  However, we _do_ want to handle this
-             * particular case when we've recovered a "done" workflow and the
+             * TODO-design Every SagaExec should be able to run_saga() exactly
+             * once.  We don't really want to let you re-run it and get a new
+             * message on finish_tx.  However, we _do_ want to handle this
+             * particular case when we've recovered a "done" saga and the
              * consumer has run() it (once).
              */
             let live_state = self.live_state.lock().await;
@@ -684,7 +687,8 @@ impl SagaExecutor {
          * completion of the compensating action.  We bound this channel's size
          * at twice the graph node count for this worst case.
          */
-        let (tx, mut rx) = mpsc::channel(2 * self.workflow.graph.node_count());
+        let (tx, mut rx) =
+            mpsc::channel(2 * self.saga_template.graph.node_count());
 
         loop {
             self.kick_off_ready(&tx).await;
@@ -745,7 +749,7 @@ impl SagaExecutor {
 
         for node_id in todo_queue {
             /*
-             * TODO-design It would be good to check whether the workflow is
+             * TODO-design It would be good to check whether the saga is
              * unwinding, and if so, whether this action has ever started
              * running before.  If not, then we can send this straight to
              * undoing without doing any more work here.  What we're
@@ -769,7 +773,7 @@ impl SagaExecutor {
             } else {
                 Arc::clone(
                     live_state
-                        .workflow
+                        .saga_template
                         .launchers
                         .get(&node_id)
                         .expect("missing action for node"),
@@ -777,7 +781,7 @@ impl SagaExecutor {
             };
 
             let task_params = TaskParams {
-                workflow: Arc::clone(&self.workflow),
+                saga_template: Arc::clone(&self.saga_template),
                 live_state: Arc::clone(&self.live_state),
                 node_id,
                 done_tx: tx.clone(),
@@ -813,13 +817,13 @@ impl SagaExecutor {
             );
 
             let sgaction = live_state
-                .workflow
+                .saga_template
                 .launchers
                 .get(&node_id)
                 .expect("missing action for node");
 
             let task_params = TaskParams {
-                workflow: Arc::clone(&self.workflow),
+                saga_template: Arc::clone(&self.saga_template),
                 live_state: Arc::clone(&self.live_state),
                 node_id,
                 done_tx: tx.clone(),
@@ -873,7 +877,7 @@ impl SagaExecutor {
             ancestor_tree: Arc::clone(&task_params.ancestor_tree),
             node_id,
             live_state: Arc::clone(&task_params.live_state),
-            workflow: Arc::clone(&task_params.workflow),
+            saga_template: Arc::clone(&task_params.saga_template),
             creator: task_params.creator.clone(),
         });
         let result = exec_future.await;
@@ -927,7 +931,7 @@ impl SagaExecutor {
             ancestor_tree: Arc::clone(&task_params.ancestor_tree),
             node_id,
             live_state: Arc::clone(&task_params.live_state),
-            workflow: Arc::clone(&task_params.workflow),
+            saga_template: Arc::clone(&task_params.saga_template),
             creator: task_params.creator.clone(),
         });
         /*
@@ -969,7 +973,7 @@ impl SagaExecutor {
         let mut rx = self.finish_tx.subscribe();
 
         async move {
-            self.run_workflow().await;
+            self.run_saga().await;
             rx.recv().await.expect("failed to receive finish message")
         }
     }
@@ -984,18 +988,18 @@ impl SagaExecutor {
         let live_state = self
             .live_state
             .try_lock()
-            .expect("attempted to get result while workflow still running?");
+            .expect("attempted to get result while saga still running?");
         assert_eq!(live_state.exec_state, SagaState::Done);
 
         let mut node_results = BTreeMap::new();
         for (node_id, output) in &live_state.node_outputs {
-            if *node_id == self.workflow.start_node
-                || *node_id == self.workflow.end_node
+            if *node_id == self.saga_template.start_node
+                || *node_id == self.saga_template.end_node
             {
                 continue;
             }
 
-            let node_name = &self.workflow.node_names[node_id];
+            let node_name = &self.saga_template.node_names[node_id];
             node_results.insert(node_name.clone(), Ok(Arc::clone(output)));
         }
 
@@ -1023,22 +1027,22 @@ impl SagaExecutor {
     {
         /* TODO-cleanup There must be a better way to do this. */
         let mut max_depth_of_node: BTreeMap<NodeIndex, usize> = BTreeMap::new();
-        max_depth_of_node.insert(self.workflow.start_node, 0);
+        max_depth_of_node.insert(self.saga_template.start_node, 0);
 
         let mut nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>> =
             BTreeMap::new();
 
-        let graph = &self.workflow.graph;
+        let graph = &self.saga_template.graph;
         let topo_visitor = Topo::new(graph);
         for node in topo_visitor.iter(graph) {
             if let Some(d) = max_depth_of_node.get(&node) {
                 assert_eq!(*d, 0);
-                assert_eq!(node, self.workflow.start_node);
+                assert_eq!(node, self.saga_template.start_node);
                 assert_eq!(max_depth_of_node.len(), 1);
                 continue;
             }
 
-            if node == self.workflow.end_node {
+            if node == self.saga_template.end_node {
                 continue;
             }
 
@@ -1064,7 +1068,7 @@ impl SagaExecutor {
 
             write!(
                 out,
-                "{:width$}+ workflow execution: {}\n",
+                "{:width$}+ saga execution: {}\n",
                 "",
                 self.saga_id,
                 width = big_indent
@@ -1081,8 +1085,8 @@ impl SagaExecutor {
                     let node = nodes[0];
                     let node_label = format!(
                         "{} (produces \"{}\")",
-                        self.workflow.node_labels[&node],
-                        &self.workflow.node_names[&node]
+                        self.saga_template.node_labels[&node],
+                        &self.saga_template.node_names[&node]
                     );
                     let node_state = live_state.node_exec_state(&node);
                     write!(out, "{}: {}\n", node_state, node_label)?;
@@ -1091,28 +1095,27 @@ impl SagaExecutor {
                     for node in nodes {
                         let node_label = format!(
                             "{} (produces \"{}\")",
-                            self.workflow.node_labels[&node],
-                            &self.workflow.node_names[&node]
+                            self.saga_template.node_labels[&node],
+                            &self.saga_template.node_names[&node]
                         );
                         let node_state = live_state.node_exec_state(&node);
-                        let child_workflows =
-                            live_state.child_workflows.get(&node);
-                        let subworkflow_char =
-                            if child_workflows.is_some() { '+' } else { '-' };
+                        let child_sagas = live_state.child_sagas.get(&node);
+                        let subsaga_char =
+                            if child_sagas.is_some() { '+' } else { '-' };
 
                         write!(
                             out,
                             "{:width$}{:>14}+-{} {}: {}\n",
                             "",
                             "",
-                            subworkflow_char,
+                            subsaga_char,
                             node_state,
                             node_label,
                             width = big_indent
                         )?;
 
-                        if let Some(workflows) = child_workflows {
-                            for c in workflows {
+                        if let Some(sagas) = child_sagas {
+                            for c in sagas {
                                 c.print_status(out, indent_level + 1).await?;
                             }
                         }
@@ -1127,19 +1130,19 @@ impl SagaExecutor {
 }
 
 /**
- * Encapsulates the (mutable) execution state of a workflow
+ * Encapsulates the (mutable) execution state of a saga
  */
 /*
  * This is linked to a `SagaExecutor` and protected by a Mutex.  The state is
- * mainly modified by [`SagaExecutor::run_workflow`].  We may add methods for
- * controlling the workflow (e.g., pausing), which would modify this as well.
- * We also intend to add methods for viewing workflow state, which will take the
+ * mainly modified by [`SagaExecutor::run_saga`].  We may add methods for
+ * controlling the saga (e.g., pausing), which would modify this as well.
+ * We also intend to add methods for viewing saga state, which will take the
  * lock to read state.
  *
- * If the view of a workflow were just (1) that it's running, and maybe (2) a
+ * If the view of a saga were just (1) that it's running, and maybe (2) a
  * set of outstanding actions, then we might take a pretty different approach
  * here.  We might create a read-only view object that's populated periodically
- * by the workflow executor.  This still might be the way to go, but at the
+ * by the saga executor.  This still might be the way to go, but at the
  * moment we anticipate wanting pretty detailed debug information (like what
  * outputs were produced by what steps), so the view would essentially be a
  * whole copy of this object.
@@ -1147,7 +1150,7 @@ impl SagaExecutor {
  */
 #[derive(Debug)]
 struct SagaExecLiveState {
-    workflow: Arc<SagaTemplate>,
+    saga_template: Arc<SagaTemplate>,
     /** Overall execution state */
     exec_state: SagaState,
 
@@ -1165,8 +1168,8 @@ struct SagaExecLiveState {
     /** Set of undone nodes. */
     nodes_undone: BTreeMap<NodeIndex, SagaUndoMode>,
 
-    /** Child workflows created by a node (for status and control) */
-    child_workflows: BTreeMap<NodeIndex, Vec<Arc<SagaExecutor>>>,
+    /** Child sagas created by a node (for status and control) */
+    child_sagas: BTreeMap<NodeIndex, Vec<Arc<SagaExecutor>>>,
 
     /** Persistent state */
     sglog: SagaLog,
@@ -1258,7 +1261,7 @@ impl SagaExecLiveState {
         }
     }
 
-    fn mark_workflow_done(&mut self) {
+    fn mark_saga_done(&mut self) {
         assert!(self.queue_todo.is_empty());
         assert!(self.queue_undo.is_empty());
         assert!(
@@ -1286,7 +1289,7 @@ impl SagaExecLiveState {
 }
 
 /**
- * Summarizes the final state of a workflow execution.
+ * Summarizes the final state of a saga execution.
  */
 pub struct SagaExecResult {
     pub saga_id: SagaId,
@@ -1302,15 +1305,15 @@ impl SagaExecResult {
     ) -> Result<T, SagaError> {
         if !self.succeeded {
             return Err(anyhow!(
-                "fetch output \"{}\" from workflow execution \
-                \"{}\": workflow did not complete successfully",
+                "fetch output \"{}\" from saga execution \
+                \"{}\": saga did not complete successfully",
                 name,
                 self.saga_id
             ));
         }
 
         let result = self.node_results.get(name).expect(&format!(
-            "node with name \"{}\" is not part of this workflow",
+            "node with name \"{}\" is not part of this saga",
             name
         ));
         let item = result.as_ref().expect(&format!(
@@ -1403,7 +1406,7 @@ fn recovery_validate_parent(
 }
 
 /**
- * Action's handle to the workflow subsystem
+ * Action's handle to the saga subsystem
  *
  * Any APIs that are useful for actions should hang off this object.  It should
  * have enough state to know which node is invoking the API.
@@ -1411,7 +1414,7 @@ fn recovery_validate_parent(
 pub struct SagaContext {
     ancestor_tree: Arc<BTreeMap<String, Arc<JsonValue>>>,
     node_id: NodeIndex,
-    workflow: Arc<SagaTemplate>,
+    saga_template: Arc<SagaTemplate>,
     live_state: Arc<Mutex<SagaExecLiveState>>,
     /* TODO-cleanup should not need a copy here */
     creator: String,
@@ -1420,7 +1423,7 @@ pub struct SagaContext {
 impl SagaContext {
     /**
      * Retrieves a piece of data stored by a previous (ancestor) node in the
-     * current workflow.  The data is identified by `name`.
+     * current saga.  The data is identified by `name`.
      *
      *
      * # Panics
@@ -1428,7 +1431,7 @@ impl SagaContext {
      * This function panics if there was no data previously stored with name
      * `name` or if the type of that data was not `T`.  (Data is stored as
      * `Arc<dyn Any>` and downcast to `T` here.)  The assumption here is actions
-     * within a workflow are tightly coupled, so the caller knows exactly what
+     * within a saga are tightly coupled, so the caller knows exactly what
      * the previous action stored.  We would enforce this at compile time if we
      * could.
      */
@@ -1448,12 +1451,12 @@ impl SagaContext {
      * a "child" saga of the current saga.
      * TODO Is there some way to prevent people from instantiating their own
      * SagaExecutor by mistake instead?  Even better: if they do that, can we
-     * detect that they're part of a workflow already somehow and make the new
-     * one a child workflow?
-     * TODO Would this be better done by having a SagaActionWorkflow that
-     * executed a workflow as an action?  This way we would know when the
-     * Workflow was constructed what the whole graph looks like, instead of only
-     * knowing about child workflows once we start executing the node that
+     * detect that they're part of a saga already somehow and make the new
+     * one a child saga?
+     * TODO Would this be better done by having a SagaActionSaga that
+     * executed a Saga as an action?  This way we would know when the
+     * Saga was constructed what the whole graph looks like, instead of only
+     * knowing about child sagas once we start executing the node that
      * creates them.
      */
     pub async fn child_saga(&self, sg: Arc<SagaTemplate>) -> Arc<SagaExecutor> {
@@ -1462,7 +1465,7 @@ impl SagaContext {
         self.live_state
             .lock()
             .await
-            .child_workflows
+            .child_sagas
             .entry(self.node_id)
             .or_insert(Vec::new())
             .push(Arc::clone(&e));
@@ -1470,6 +1473,6 @@ impl SagaContext {
     }
 
     pub fn node_label(&self) -> &str {
-        self.workflow.node_labels.get(&self.node_id).unwrap()
+        self.saga_template.node_labels.get(&self.node_id).unwrap()
     }
 }

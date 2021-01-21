@@ -8,12 +8,12 @@ semaphore.  In normal mode, it does nothing.)  Could add CLI tool that runs up
 to a breakpoint and exits (optionally dumps log).  Could then add a "step"
 version.
 
-Subworkflows and recovery: this might "just work" if workflow actions that
-create subworkflows were idempotent.  But I don't think they are today.  Maybe
-if we first-class `SagaActionWorkflow`, the framework can ensure that this is
+Subsagas and recovery: this might "just work" if saga actions that
+create subsagas were idempotent.  But I don't think they are today.  Maybe
+if we first-class `SagaActionSaga`, the framework can ensure that this is
 done idempotently.  Relatedly, if we add policies around whether each node has
 an "undo" action, for this type of node, we might need that policy to differ
-depending on the SagaActionWorkflow (and not the Workflow behind it).
+depending on the SagaActionSaga (and not the Saga behind it).
 
 Static typing in the construction and execution of the graph:
 
@@ -33,8 +33,8 @@ Static typing in the construction and execution of the graph:
   builder stage, we keep track of these types so that we can fail at
   compile time when constructing an invalid graph.
 
-Even if we skip the static typing: the interface for constructing a workflow
-DAG feels like it needs work.
+Even if we skip the static typing: the interface for constructing a saga DAG
+feels like it needs work.
 
 
 ================================================================
@@ -64,7 +64,7 @@ This makes sense.  It's not yet totally clear to me how we manage cancellation/u
 
 --------------------------------
 
-Regarding static typing for workflow nodes: see
+Regarding static typing for saga nodes: see
 "specs", then "legion", then "bevy"
 https://kyren.github.io/2018/09/14/rustconf-talk.html
 https://specs.amethyst.rs/docs/tutorials/04_resources.html
@@ -81,7 +81,7 @@ Top-level subparts of the problem
 
 - What's the syntax for constructing the graph?  Can graphs be modified while
   they're being executed?  (If not, the syntax for constructing them can
-  probably be made a lot cleaner.  But some workflows may require this, as
+  probably be made a lot cleaner.  But some sagas may require this, as
   when step N is used to stamp out a bunch of different instances of step N +
   1.)
 
@@ -105,9 +105,9 @@ Summary of issues I spent a lot of time on so far
 
 I had a lot more stream-of-consciousness notes on a lot of this in src/lib.rs that I'm removing on 2021-01-08.
 
-- Shared state and persistence.  Is there one shared-state object for the whole workflow?  Subworkflows require translation back and forth, and it means state is mutable.  That's not great.  And how do we persist it?  Instead, went with saying each action can produce exactly one value (arbitrary type), stored as Arc<dyn Any>.  Sad that it's dynamically-typed, but on the plus side: it's immutable once emitted by the action, actions never explicitly store state (and so don't decide when, and so can't get that wrong), we can put that output into the saga log, and it's easy to share to dependent nodes since it's immutable.
+- Shared state and persistence.  Is there one shared-state object for the whole saga?  Subsagas require translation back and forth, and it means state is mutable.  That's not great.  And how do we persist it?  Instead, went with saying each action can produce exactly one value (arbitrary type), stored as Arc<dyn Any>.  Sad that it's dynamically-typed, but on the plus side: it's immutable once emitted by the action, actions never explicitly store state (and so don't decide when, and so can't get that wrong), we can put that output into the saga log, and it's easy to share to dependent nodes since it's immutable.
 - How can we make construction of the graph statically type-checked, so that if an action depends on data supplied by a previous node, then it won't compile if you don't put that node ahead of it in the graph.  I gave up trying to do this and instead went with a dynamically-typed form of getting data from ancestor nodes (see above).  I still hope we can revisit this later once we have the rest of the SEC built.
-- Idempotence of actions: an obvious implementation for a lot of things is to generate a uuid and create an object with that uuid.  That's not idempotent!  How can we avoid creating a second one (and leaking it) if we crash immediately before recording the first one?  Lots of approaches here, but none very satisfying.  On the plus side, this seems fairly testable -- we can run a workflow, simulate a crash immediately before state is saved for an action, rerun the action, and see if it made changes to the (simulated?) database.
+- Idempotence of actions: an obvious implementation for a lot of things is to generate a uuid and create an object with that uuid.  That's not idempotent!  How can we avoid creating a second one (and leaking it) if we crash immediately before recording the first one?  Lots of approaches here, but none very satisfying.  On the plus side, this seems fairly testable -- we can run a saga, simulate a crash immediately before state is saved for an action, rerun the action, and see if it made changes to the (simulated?) database.
 - Failover.  How do avoid two SECs going split-brain?  There are a couple of basic approaches:
   - make sure it can't happen by requiring that an SEC _explicitly_ hand off control of a saga in all circumstances.  This makes some circumstances much more annoying to recover (e.g., extended offline due to a panic or partition), but maybe isn't a big deal in practice.
   - make sure it can't happen by designing the log + SEC algorithm in such a way that two SECs cannot write log entries in a case where one was unaware of what the other was doing. (e.g., OCC generation number on the saga itself).  However, with this approach, I don't think there's a way to avoid having potentially executed an action twice (and possibly twice concurrently!) in the split-brain scenario.
@@ -144,8 +144,8 @@ See https://www.youtube.com/watch?v=0UTOLRTwOX0, starting around T=23m:
 Open items from distributed saga log:
 - how do you ensure that two executors aren't working concurrently on the
   same saga? (as described, there's a race in checking log and taking action,
-  I think).  Maybe we can deal with this by always updating a workflow
-  "generation" record every time we add an entry to the log?
+  I think).  Maybe we can deal with this by always updating a saga "generation"
+  record every time we add an entry to the log?
 - At 30m30s or so, she sort of talks about SEC failure or distribution.
   Sounds like she thinks it all "just works"?
 - how do you identify when the coordinator fails and resume elsewhere?

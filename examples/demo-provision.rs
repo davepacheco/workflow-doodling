@@ -25,13 +25,13 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 }
 
-/// Demo workflow implementation
+/// Demo saga implementation
 #[derive(Debug, StructOpt)]
 enum Demo {
-    /// Dump a dot (graphviz) representation of the workflow graph
+    /// Dump a dot (graphviz) representation of the saga graph
     Dot,
 
-    /// Dump information about the workflow graph (not an execution)
+    /// Dump information about the saga graph (not an execution)
     Info,
 
     /// Pretty-print the log from a previous execution
@@ -40,7 +40,7 @@ enum Demo {
         print_log_args: PrintLogArgs,
     },
 
-    /// Execute the workflow
+    /// Execute the saga
     Run {
         #[structopt(flatten)]
         run_args: RunArgs,
@@ -53,8 +53,8 @@ enum Demo {
 
 async fn cmd_dot() -> Result<(), anyhow::Error> {
     let mut stdout = io::stdout();
-    let workflow = make_provision_saga();
-    workflow.print_dot(&mut stdout).unwrap();
+    let saga_template = make_provision_saga();
+    saga_template.print_dot(&mut stdout).unwrap();
     Ok(())
 }
 
@@ -64,13 +64,13 @@ async fn cmd_dot() -> Result<(), anyhow::Error> {
 
 async fn cmd_info() -> Result<(), anyhow::Error> {
     let mut stderr = io::stderr();
-    let workflow = make_provision_saga();
-    eprintln!("*** workflow definition ***");
-    eprintln!("workflow graph: ");
-    workflow.print_dot(&mut stderr).unwrap();
+    let saga_template = make_provision_saga();
+    eprintln!("*** saga template definition ***");
+    eprintln!("saga template graph: ");
+    saga_template.print_dot(&mut stderr).unwrap();
 
     eprintln!("*** initial state ***");
-    let exec = SagaExecutor::new(workflow, "provision-info");
+    let exec = SagaExecutor::new(saga_template, "provision-info");
     exec.print_status(&mut stderr, 0).await.unwrap();
     Ok(())
 }
@@ -81,7 +81,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
 
 #[derive(Debug, StructOpt)]
 struct PrintLogArgs {
-    /// path to the workflow log to pretty-print
+    /// path to the saga log to pretty-print
     input_log_path: PathBuf,
 }
 
@@ -103,7 +103,7 @@ async fn cmd_print_log(args: &PrintLogArgs) -> Result<(), anyhow::Error> {
 
 #[derive(Debug, StructOpt)]
 struct RunArgs {
-    /// simulate an error at the named workflow node
+    /// simulate an error at the named saga node
     #[structopt(long)]
     inject_error: Vec<String>,
 
@@ -111,7 +111,7 @@ struct RunArgs {
     #[structopt(long)]
     dump_to: Option<PathBuf>,
 
-    /// recover the workflow log from the named file and resume execution
+    /// recover the saga log from the named file and resume execution
     #[structopt(long)]
     recover_from: Option<PathBuf>,
 
@@ -122,7 +122,7 @@ struct RunArgs {
 
 async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     let mut stderr = io::stderr();
-    let workflow = make_provision_saga();
+    let saga_template = make_provision_saga();
     let exec = if let Some(input_log_path) = &args.recover_from {
         eprintln!("recovering from log: {}", input_log_path.display());
 
@@ -133,7 +133,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             format!("load log \"{}\"", input_log_path.display())
         })?;
         let exec = SagaExecutor::new_recover(
-            Arc::clone(&workflow),
+            Arc::clone(&saga_template),
             sglog,
             &args.creator,
         )
@@ -146,21 +146,21 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         eprintln!("");
         exec
     } else {
-        SagaExecutor::new(Arc::clone(&workflow), &args.creator)
+        SagaExecutor::new(Arc::clone(&saga_template), &args.creator)
     };
 
     for node_name in &args.inject_error {
         let node_id =
-            workflow.node_for_name(&node_name).with_context(|| {
+            saga_template.node_for_name(&node_name).with_context(|| {
                 format!("bad argument for --inject-error: {:?}", node_name)
             })?;
         exec.inject_error(node_id).await;
         eprintln!("will inject error at node \"{}\"", node_name);
     }
 
-    eprintln!("*** running workflow ***");
+    eprintln!("*** running saga ***");
     exec.run().await;
-    eprintln!("*** finished workflow ***");
+    eprintln!("*** finished saga ***");
 
     eprintln!("\n*** final state ***");
     exec.print_status(&mut stderr, 0).await.unwrap();
